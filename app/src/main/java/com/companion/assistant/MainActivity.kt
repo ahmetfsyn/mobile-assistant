@@ -1,6 +1,8 @@
 package com.companion.assistant
 
+import android.Manifest
 import android.app.Activity
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
@@ -10,6 +12,7 @@ import android.view.WindowManager
 class MainActivity : Activity() {
 
     private var faceView: FaceView? = null
+    private var voiceController: VoiceInteractionController? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -17,8 +20,15 @@ class MainActivity : Activity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         applyImmersiveFullscreen()
 
-        faceView = FaceView(this)
-        setContentView(faceView)
+        val face = FaceView(this)
+        faceView = face
+        voiceController = VoiceInteractionController(
+            faceView = face,
+            speechRecognizer = SpeechRecognizerFactory.create(),
+            speechOutput = TextToSpeechManager(applicationContext)
+        )
+        face.setOnFaceTapListener { onFaceTapped() }
+        setContentView(face)
     }
 
     override fun onResume() {
@@ -33,14 +43,44 @@ class MainActivity : Activity() {
     }
 
     override fun onPause() {
+        voiceController?.onHostPaused()
         faceView?.stop()
         super.onPause()
     }
 
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQUEST_MICROPHONE) return
+
+        if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+            voiceController?.toggleListening()
+        } else {
+            faceView?.showVoiceError("MİKROFON İZNİ VERİLMEDİ")
+        }
+    }
+
     override fun onDestroy() {
+        voiceController?.close()
+        voiceController = null
         faceView?.destroy()
         faceView = null
         super.onDestroy()
+    }
+
+    private fun onFaceTapped() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+            checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        ) {
+            voiceController?.toggleListening()
+            return
+        }
+
+        faceView?.showVoiceError("SESLİ İLETİŞİM İÇİN MİKROFON İZNİ GEREKLİ")
+        requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_MICROPHONE)
     }
 
     @Suppress("DEPRECATION")
@@ -64,5 +104,9 @@ class MainActivity : Activity() {
                     View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
                     View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
         }
+    }
+
+    private companion object {
+        const val REQUEST_MICROPHONE = 4101
     }
 }

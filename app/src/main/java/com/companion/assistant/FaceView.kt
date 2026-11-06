@@ -55,7 +55,8 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
     private var eyeHeight = 0f
     private var panelRadius = 0f
     private var faceCenterY = 0f
-    private var status = "HELLO, HUMAN"
+    private var status = "MERHABA"
+    private var onFaceTapListener: (() -> Unit)? = null
     private var running = false
     private var destroyed = false
     private var frameQueued = false
@@ -95,8 +96,23 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
         if (destroyed) return
         stop()
         destroyed = true
+        onFaceTapListener = null
         handler.removeCallbacksAndMessages(null)
     }
+
+    fun setOnFaceTapListener(listener: (() -> Unit)?) {
+        onFaceTapListener = listener
+    }
+
+    fun showVoiceListening() = behavior.onVoiceListening()
+
+    fun showVoiceProcessing() = behavior.onVoiceProcessing()
+
+    fun showVoiceSpeaking() = behavior.onVoiceSpeaking()
+
+    fun showVoiceError(message: String) = behavior.onVoiceError(message)
+
+    fun finishVoiceInteraction() = behavior.finishVoiceInteraction()
 
     override fun setExpression(expression: FaceExpression, status: String, durationMs: Long) {
         this.status = status
@@ -312,7 +328,7 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
         textPaint.color = SUBTITLE_COLOR
         textPaint.textSize = dp(9f)
         textPaint.letterSpacing = 0.21f
-        canvas.drawText("DESK COMPANION", width * 0.5f, height * 0.91f, textPaint)
+        canvas.drawText("MASA ARKADAŞIN", width * 0.5f, height * 0.91f, textPaint)
         textPaint.letterSpacing = 0.13f
     }
 
@@ -331,7 +347,9 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
                 return true
             }
             MotionEvent.ACTION_UP -> {
-                behavior.onTouchUp(SystemClock.uptimeMillis() - touchDownAt)
+                val elapsedMs = SystemClock.uptimeMillis() - touchDownAt
+                behavior.onTouchUp(elapsedMs)
+                if (elapsedMs < 650L) onFaceTapListener?.invoke()
                 performClick()
                 return true
             }

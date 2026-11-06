@@ -19,6 +19,7 @@ internal class FaceBehavior(
     private var hasWelcomed = false
     private var touchHeld = false
     private var longPressTriggered = false
+    private var voiceInteractionActive = false
     private var lastInteraction = SystemClock.uptimeMillis()
     private var currentExpression = FaceExpression.NEUTRAL
     private var snoozeTriggered = false
@@ -29,6 +30,7 @@ internal class FaceBehavior(
     private val sleepyRunnable = Runnable { enterSleep() }
     private val wakeRunnable = Runnable { wakeFromSleep() }
     private val longPressRunnable = Runnable { enterTouchSleep() }
+    private val voiceErrorReturnRunnable = Runnable { finishVoiceInteraction() }
 
     fun start() {
         if (running) return
@@ -38,7 +40,7 @@ internal class FaceBehavior(
 
         if (!hasWelcomed) {
             hasWelcomed = true
-            show(FaceExpression.ATTENTIVE, "HELLO, HUMAN", 720L)
+            show(FaceExpression.ATTENTIVE, "MERHABA", 720L)
             handler.postDelayed(returnRunnable, 2800L)
         } else if (currentExpression == FaceExpression.SLEEPING) {
             scheduleWake(18_000L)
@@ -57,6 +59,8 @@ internal class FaceBehavior(
         handler.removeCallbacks(sleepyRunnable)
         handler.removeCallbacks(wakeRunnable)
         handler.removeCallbacks(longPressRunnable)
+        handler.removeCallbacks(voiceErrorReturnRunnable)
+        voiceInteractionActive = false
     }
 
     fun onTouchDown(x: Float, y: Float) {
@@ -71,7 +75,7 @@ internal class FaceBehavior(
             currentExpression == FaceExpression.SLEEPY
         show(
             FaceExpression.ATTENTIVE,
-            if (woke) "OH! HELLO" else "I'M LISTENING",
+            if (woke) "OO! MERHABA" else "DİNLİYORUM",
             500L
         )
         listener.moveGaze(x, y, 300L)
@@ -92,11 +96,11 @@ internal class FaceBehavior(
         if (longPressTriggered) {
             scheduleWake(14_000L)
         } else if (elapsedMs < 650L) {
-            show(FaceExpression.HAPPY, "THAT'S FOR ME", 460L)
+            show(FaceExpression.HAPPY, "BU BENİM İÇİN", 460L)
             handler.postDelayed(returnRunnable, 1500L)
             scheduleBlink(2600L)
         } else {
-            show(FaceExpression.ATTENTIVE, "FOLLOWING YOU", 400L)
+            show(FaceExpression.ATTENTIVE, "SENİ TAKİP EDİYORUM", 400L)
             handler.postDelayed(returnRunnable, 2000L)
         }
 
@@ -110,8 +114,40 @@ internal class FaceBehavior(
         scheduleIdle(5000L)
     }
 
+    fun onVoiceListening() {
+        voiceInteractionActive = true
+        cancelBehaviorTimers()
+        handler.removeCallbacks(voiceErrorReturnRunnable)
+        show(FaceExpression.ATTENTIVE, "DİNLİYORUM", 360L)
+    }
+
+    fun onVoiceProcessing() {
+        if (!voiceInteractionActive) return
+        show(FaceExpression.CURIOUS, "ANLAMAYA ÇALIŞIYORUM", 420L)
+    }
+
+    fun onVoiceSpeaking() {
+        if (!voiceInteractionActive) return
+        show(FaceExpression.HAPPY, "YANIT VERİYORUM", 440L)
+    }
+
+    fun onVoiceError(status: String) {
+        voiceInteractionActive = false
+        cancelBehaviorTimers()
+        handler.removeCallbacks(voiceErrorReturnRunnable)
+        show(FaceExpression.CURIOUS, status, 360L)
+        handler.postDelayed(voiceErrorReturnRunnable, 1800L)
+    }
+
+    fun finishVoiceInteraction() {
+        handler.removeCallbacks(voiceErrorReturnRunnable)
+        voiceInteractionActive = false
+        show(FaceExpression.NEUTRAL, "HAZIRIM", 560L)
+        scheduleIdle(1400L)
+    }
+
     private fun runIdleBehavior() {
-        if (!running || touchHeld) return
+        if (!running || touchHeld || voiceInteractionActive) return
 
         if (currentExpression == FaceExpression.SLEEPING) {
             scheduleIdle(7000L)
@@ -121,7 +157,7 @@ internal class FaceBehavior(
         val idleFor = SystemClock.uptimeMillis() - lastInteraction
         if (idleFor > 105_000L && !snoozeTriggered && Random.nextFloat() < 0.38f) {
             snoozeTriggered = true
-            show(FaceExpression.SLEEPY, "EYES GETTING HEAVY", 850L)
+            show(FaceExpression.SLEEPY, "GÖZLERİM AĞIRLAŞTI", 850L)
             handler.postDelayed(sleepyRunnable, 6200L)
             scheduleIdle(12_000L)
             return
@@ -129,24 +165,24 @@ internal class FaceBehavior(
 
         when (Random.nextInt(100)) {
             in 0..21 -> {
-                show(FaceExpression.NEUTRAL, "JUST LOOKING", 520L)
+                show(FaceExpression.NEUTRAL, "ETRAFI İZLİYORUM", 520L)
                 listener.moveGaze(randomGazeX(), randomGazeY(), 760L)
             }
             in 22..54 -> {
-                show(FaceExpression.CURIOUS, "WHAT'S THAT?", 620L)
+                show(FaceExpression.CURIOUS, "BU DA NE?", 620L)
                 listener.moveGaze(randomSide(), randomGazeY(), 520L)
                 handler.postDelayed(returnRunnable, 2600L)
             }
             in 55..72 -> {
-                show(FaceExpression.HAPPY, "NICE TO SEE YOU", 520L)
+                show(FaceExpression.HAPPY, "SENİ GÖRMEK GÜZEL", 520L)
                 handler.postDelayed(returnRunnable, 2300L)
             }
             in 73..77 -> {
-                show(FaceExpression.SURPRISED, "OH!", 420L)
+                show(FaceExpression.SURPRISED, "OO!", 420L)
                 handler.postDelayed(returnRunnable, 1300L)
             }
             else -> {
-                show(FaceExpression.NEUTRAL, "JUST RELAXING", 600L)
+                show(FaceExpression.NEUTRAL, "BURADAYIM", 600L)
                 listener.moveGaze(0f, 0f, 700L)
             }
         }
@@ -163,9 +199,9 @@ internal class FaceBehavior(
     }
 
     private fun returnToNeutral() {
-        if (!running || touchHeld) return
+        if (!running || touchHeld || voiceInteractionActive) return
         if (currentExpression == FaceExpression.SLEEPING || currentExpression == FaceExpression.SLEEPY) return
-        show(FaceExpression.NEUTRAL, "JUST RELAXING", 620L)
+        show(FaceExpression.NEUTRAL, "BURADAYIM", 620L)
         if (Random.nextFloat() < 0.5f) {
             listener.moveGaze(randomGazeX() * 0.6f, randomGazeY() * 0.6f, 700L)
         }
@@ -173,7 +209,7 @@ internal class FaceBehavior(
 
     private fun enterSleep() {
         if (!running || touchHeld || currentExpression != FaceExpression.SLEEPY) return
-        show(FaceExpression.SLEEPING, "ZZZ", 1100L)
+        show(FaceExpression.SLEEPING, "UYKU VAKTİ", 1100L)
         handler.removeCallbacks(blinkRunnable)
         scheduleWake(Random.nextLong(18_000L, 28_000L))
     }
@@ -181,14 +217,14 @@ internal class FaceBehavior(
     private fun enterTouchSleep() {
         if (!running || !touchHeld) return
         longPressTriggered = true
-        show(FaceExpression.SLEEPING, "SNOOZE MODE", 680L)
+        show(FaceExpression.SLEEPING, "KISA BİR UYKU", 680L)
         handler.removeCallbacks(returnRunnable)
         handler.removeCallbacks(blinkRunnable)
     }
 
     private fun wakeFromSleep() {
         if (!running || touchHeld || currentExpression != FaceExpression.SLEEPING) return
-        show(FaceExpression.NEUTRAL, "GOOD MORNING", 900L)
+        show(FaceExpression.NEUTRAL, "GÜNAYDIN", 900L)
         listener.moveGaze(0f, 0f, 800L)
         scheduleBlink(1600L)
     }
