@@ -1,0 +1,24 @@
+# Gradle state and build outputs
+.gradle/
+.kotlin/
+**/build/
+
+# Local Android SDK configuration
+local.properties
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+
+# Android native build outputs
+.externalNativeBuild/
+.cxx/
+captures/
+
+# Generated packages and crash dumps
+*.apk
+*.aab
+*.hprof
+
+# macOS metadata
+.DS_Store
