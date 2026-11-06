@@ -48,6 +48,11 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
     private val panelRect = RectF()
     private val eyeRect = RectF()
     private val highlightRect = RectF()
+    private val diagnosticButtonRect = RectF()
+    private val diagnosticButtonPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val diagnosticButtonBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+    }
 
     private var panelGradient: LinearGradient? = null
     private var eyeGradient: LinearGradient? = null
@@ -57,6 +62,8 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
     private var faceCenterY = 0f
     private var status = "MERHABA"
     private var onFaceTapListener: (() -> Unit)? = null
+    private var onDiagnosticTapListener: (() -> Unit)? = null
+    private var diagnosticTouch = false
     private var running = false
     private var destroyed = false
     private var frameQueued = false
@@ -97,11 +104,16 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
         stop()
         destroyed = true
         onFaceTapListener = null
+        onDiagnosticTapListener = null
         handler.removeCallbacksAndMessages(null)
     }
 
     fun setOnFaceTapListener(listener: (() -> Unit)?) {
         onFaceTapListener = listener
+    }
+
+    fun setOnDiagnosticTapListener(listener: (() -> Unit)?) {
+        onDiagnosticTapListener = listener
     }
 
     fun showVoiceListening() = behavior.onVoiceListening()
@@ -179,6 +191,13 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
             floatArrayOf(0f, 0.48f, 1f),
             Shader.TileMode.CLAMP
         )
+        diagnosticButtonRect.set(
+            w - dp(126f),
+            h - dp(54f),
+            w - dp(16f),
+            h - dp(16f)
+        )
+        diagnosticButtonBorderPaint.strokeWidth = dp(1f)
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -205,8 +224,24 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
         drawEyes(canvas)
         drawStatus(canvas)
         canvas.restore()
+        drawDiagnosticButton(canvas)
 
         if (animator.isAnimating(now)) scheduleFrame()
+    }
+
+    private fun drawDiagnosticButton(canvas: Canvas) {
+        val radius = dp(19f)
+        diagnosticButtonPaint.color = 0xCC0B1721.toInt()
+        canvas.drawRoundRect(diagnosticButtonRect, radius, radius, diagnosticButtonPaint)
+        diagnosticButtonBorderPaint.color = 0x553FAFD0
+        canvas.drawRoundRect(diagnosticButtonRect, radius, radius, diagnosticButtonBorderPaint)
+
+        textPaint.style = Paint.Style.FILL
+        textPaint.color = 0xBB9BC9DA.toInt()
+        textPaint.textSize = dp(9f)
+        textPaint.letterSpacing = 0.12f
+        canvas.drawText("SES TESTİ", diagnosticButtonRect.centerX(), diagnosticButtonRect.centerY() + dp(3f), textPaint)
+        textPaint.letterSpacing = 0.13f
     }
 
     private fun drawPanelDetails(canvas: Canvas) {
@@ -336,8 +371,30 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
         val gazeX = ((event.x / width.coerceAtLeast(1)) * 2f - 1f).coerceIn(-1f, 1f)
         val gazeY = ((event.y / height.coerceAtLeast(1)) * 2f - 1f).coerceIn(-0.8f, 0.8f)
 
+        if (diagnosticTouch) {
+            when (event.actionMasked) {
+                MotionEvent.ACTION_UP -> {
+                    diagnosticTouch = false
+                    if (diagnosticButtonRect.contains(event.x, event.y)) {
+                        onDiagnosticTapListener?.invoke()
+                        performClick()
+                    }
+                    return true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    diagnosticTouch = false
+                    return true
+                }
+                else -> return true
+            }
+        }
+
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                if (diagnosticButtonRect.contains(event.x, event.y)) {
+                    diagnosticTouch = true
+                    return true
+                }
                 touchDownAt = SystemClock.uptimeMillis()
                 behavior.onTouchDown(gazeX, gazeY)
                 return true

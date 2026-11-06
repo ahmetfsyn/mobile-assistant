@@ -13,6 +13,9 @@ class MainActivity : Activity() {
 
     private var faceView: FaceView? = null
     private var voiceController: VoiceInteractionController? = null
+    private var audioDiagnosticView: AudioDiagnosticView? = null
+    private var audioDiagnosticController: AudioOutputDiagnosticController? = null
+    private var showingAudioDiagnostics = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -28,13 +31,14 @@ class MainActivity : Activity() {
             speechOutput = TextToSpeechManager(applicationContext)
         )
         face.setOnFaceTapListener { onFaceTapped() }
+        face.setOnDiagnosticTapListener { openAudioDiagnostics() }
         setContentView(face)
     }
 
     override fun onResume() {
         super.onResume()
         applyImmersiveFullscreen()
-        faceView?.start()
+        if (!showingAudioDiagnostics) faceView?.start()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -44,8 +48,17 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         voiceController?.onHostPaused()
+        closeAudioDiagnostics(showFace = true, restartFace = false)
         faceView?.stop()
         super.onPause()
+    }
+
+    override fun onBackPressed() {
+        if (showingAudioDiagnostics) {
+            closeAudioDiagnostics(showFace = true, restartFace = true)
+        } else {
+            super.onBackPressed()
+        }
     }
 
     override fun onRequestPermissionsResult(
@@ -64,8 +77,10 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        closeAudioDiagnostics(showFace = false, restartFace = false)
         voiceController?.close()
         voiceController = null
+        faceView?.setOnDiagnosticTapListener(null)
         faceView?.destroy()
         faceView = null
         super.onDestroy()
@@ -81,6 +96,45 @@ class MainActivity : Activity() {
 
         faceView?.showVoiceError("SESLİ İLETİŞİM İÇİN MİKROFON İZNİ GEREKLİ")
         requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_MICROPHONE)
+    }
+
+    private fun openAudioDiagnostics() {
+        if (showingAudioDiagnostics) return
+
+        voiceController?.onHostPaused()
+        faceView?.stop()
+        showingAudioDiagnostics = true
+
+        val diagnosticView = AudioDiagnosticView(this, object : AudioDiagnosticView.Listener {
+            override fun onOutputSelected(output: AudioDiagnosticView.Output) {
+                audioDiagnosticController?.testOutput(output)
+            }
+
+            override fun onReturnToFace() {
+                closeAudioDiagnostics(showFace = true, restartFace = true)
+            }
+        })
+        audioDiagnosticView = diagnosticView
+        audioDiagnosticController = AudioOutputDiagnosticController(this, diagnosticView::showStatus)
+        setContentView(diagnosticView)
+        applyImmersiveFullscreen()
+    }
+
+    private fun closeAudioDiagnostics(showFace: Boolean, restartFace: Boolean) {
+        if (!showingAudioDiagnostics && audioDiagnosticController == null && audioDiagnosticView == null) return
+
+        audioDiagnosticController?.close()
+        audioDiagnosticController = null
+        audioDiagnosticView = null
+        showingAudioDiagnostics = false
+
+        if (showFace) {
+            faceView?.let { face ->
+                setContentView(face)
+                applyImmersiveFullscreen()
+                if (restartFace) face.start()
+            }
+        }
     }
 
     @Suppress("DEPRECATION")
