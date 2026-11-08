@@ -42,6 +42,10 @@ curl http://127.0.0.1:10000/v1/conversations \
 
 The last request calls the configured Gemini model. A successful response includes `reply`, `provider`, and `model`. Automated tests use mocked provider HTTP responses; they do not require or verify a real key.
 
+## Run locally with Docker Compose
+
+For the macOS local Docker setup, Android LAN connection instructions, health checks, logs, and rebuild commands, see [`../LOCAL_DOCKER_BACKEND.md`](../LOCAL_DOCKER_BACKEND.md). The root `compose.yaml` reuses this backend Dockerfile, reads `backend/.env`, and publishes port `3000` for devices on the same trusted private network.
+
 ## Deploy to Oracle Cloud
 
 For the Ubuntu VPS deployment, Docker Compose, Caddy HTTPS, server-side environment file, network rules, and update/recovery commands, follow [`../ORACLE_CLOUD_DEPLOYMENT.md`](../ORACLE_CLOUD_DEPLOYMENT.md). The API container listens on port `3000` inside the Compose network; Caddy is the only service publishing web ports. The Gemini key stays in `/etc/masa-arkadasi/.env` on the server and is excluded from the image and build context.

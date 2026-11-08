@@ -117,7 +117,7 @@ internal class MockConversationEngine : ConversationEngine {
     }
 }
 
-/** Thin Android client for the provider-neutral HTTPS conversation API. */
+/** Thin Android client for the provider-neutral conversation API. */
 internal class HttpConversationEngine(endpoint: String) : ConversationEngine {
     private val baseUrl = endpoint.trim().trimEnd('/')
     private val requestGeneration = AtomicLong()
@@ -185,8 +185,15 @@ internal class HttpConversationEngine(endpoint: String) : ConversationEngine {
         } catch (error: MalformedURLException) {
             throw ConversationFailure("BULUT SUNUCU ADRESİ GEÇERSİZ", error)
         }
-        if (!url.protocol.equals("https", ignoreCase = true)) {
-            throw ConversationFailure("BULUT SUNUCU ADRESİ HTTPS OLMALI")
+        val isHttps = url.protocol.equals("https", ignoreCase = true)
+        val isPrivateLanHttp = url.protocol.equals("http", ignoreCase = true) && isPrivateLanIpv4(url.host)
+        if (!isHttps && !isPrivateLanHttp) {
+            val message = if (url.protocol.equals("http", ignoreCase = true)) {
+                "HTTP ADRESİ ÖZEL LAN IP'Sİ OLMALI"
+            } else {
+                "BULUT SUNUCU HTTPS OLMALI"
+            }
+            throw ConversationFailure(message)
         }
         if (url.userInfo != null || url.query != null || url.ref != null) {
             throw ConversationFailure("BULUT SUNUCU ADRESİ KİMLİK BİLGİSİ İÇERMEMELİ")
@@ -274,6 +281,20 @@ internal class HttpConversationEngine(endpoint: String) : ConversationEngine {
         const val CHAT_READ_TIMEOUT_MS = 25_000
         const val MAX_RESPONSE_CHARS = 64 * 1024
         const val MAX_HISTORY_MESSAGES = 8
+
+        /** Local HTTP is allowed only for RFC 1918 IPv4 hosts used on a trusted LAN. */
+        fun isPrivateLanIpv4(host: String): Boolean {
+            val octets = host.split('.')
+            if (octets.size != 4) return false
+            val address = octets.map { octet ->
+                if (octet.isEmpty() || octet.any { it !in '0'..'9' } ||
+                    (octet.length > 1 && octet[0] == '0')) return false
+                octet.toIntOrNull()?.takeIf { it in 0..255 } ?: return false
+            }
+            return address[0] == 10 ||
+                (address[0] == 172 && address[1] in 16..31) ||
+                (address[0] == 192 && address[1] == 168)
+        }
     }
 }
 

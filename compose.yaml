@@ -1,0 +1,32 @@
+name: masa-arkadasi-local
+
+services:
+  companion-api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: masa-arkadasi-api:local
+    restart: unless-stopped
+    init: true
+    env_file:
+      - ./backend/.env
+    environment:
+      HOST: 0.0.0.0
+      PORT: "3000"
+    ports:
+      - "${MAC_LOCAL_IP:-127.0.0.1}:3000:3000/tcp"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/healthz').then(response => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "5"
