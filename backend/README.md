@@ -1,20 +1,48 @@
 # Masa Arkadaşı Conversation API
 
-This is a small, provider-neutral HTTPS backend for the Android companion. It uses Node.js built-ins only and has no dependency on the phone's paired computer at runtime.
+A small, provider-neutral HTTPS backend for the Android companion. It uses Node.js built-ins only and keeps all provider credentials on the server.
 
-## Run and test locally
+## Configure Gemini locally
 
-Requires Node.js 20 or newer. No `npm install` is needed.
+Requires Node.js 20.12 or newer. The service loads `backend/.env` at startup with Node's built-in environment-file loader. Existing process/host environment variables take precedence over values in the local file.
+
+1. Create a Gemini API key in [Google AI Studio](https://aistudio.google.com/app/apikey).
+2. If `backend/.env` does not exist, copy `backend/.env.example` to `backend/.env`.
+3. Set the following values in `backend/.env`:
+
+   ```dotenv
+   AI_PROVIDER=gemini
+   AI_MODEL=gemini-2.5-flash
+   GEMINI_API_KEY=your-key-from-google-ai-studio
+   ```
+
+`backend/.env` is ignored by Git. Keep the key there only for local development; never add it to Android configuration, build files, APK assets, logs, or commits. The checked-in `.env.example` contains no key.
+
+Start and test the service:
 
 ```sh
 cd backend
 npm test
-AI_PROVIDER=mock AI_MODEL=companion-mock npm start
+npm start
 ```
 
-The service listens on `0.0.0.0:$PORT` (default port `10000`). In the mock configuration, `/v1/conversations` returns a clearly labeled test-mode response and does not call an AI provider.
+The server listens on `0.0.0.0:$PORT` (default port `10000`). Gemini is the default provider and `gemini-2.5-flash` is the default model. The existing OpenAI, Anthropic, and explicit `mock` adapters remain available. The service does not silently switch models or providers when Gemini is unavailable.
 
-## Deploy as a hosted service
+## Make an actual Gemini request
+
+After setting a valid `GEMINI_API_KEY` in the backend environment and starting the service, check readiness and make a conversation request:
+
+```sh
+curl http://127.0.0.1:10000/healthz
+curl http://127.0.0.1:10000/v1/config
+curl http://127.0.0.1:10000/v1/conversations \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"Bugün ne keşfedelim?","language":"tr-TR","history":[]}'
+```
+
+The last request calls the configured Gemini model. A successful response includes `reply`, `provider`, and `model`. Automated tests use mocked provider HTTP responses; they do not require or verify a real key.
+
+## Deploy to Render
 
 One lightweight option is a Render **Web Service** backed by this repository:
 
@@ -22,51 +50,53 @@ One lightweight option is a Render **Web Service** backed by this repository:
 2. Set **Root Directory** to `backend`.
 3. Set **Build Command** to `npm test` and **Start Command** to `npm start`.
 4. Set the health-check path to `/healthz`.
-5. Add the provider environment variables below in the hosting dashboard, then deploy.
-6. Copy the service's HTTPS base URL into the Android build setting described in `../VOICE_SETUP.md`.
+5. In **Environment** → **Environment Variables**, add:
 
-The server binds to the hosting platform's `PORT` and `0.0.0.0`; the phone only talks to the hosted HTTPS URL. The backend runs independently of the development computer. Provider API keys belong in the host's secret environment-variable store, never in Git or the APK.
+   | Name | Value |
+   | --- | --- |
+   | `AI_PROVIDER` | `gemini` |
+   | `AI_MODEL` | `gemini-2.5-flash` |
+   | `GEMINI_API_KEY` | Paste the key from Google AI Studio |
+
+6. Deploy the service and copy its HTTPS base URL into the Android build setting in `../VOICE_SETUP.md`.
+
+Use the host's environment-variable secret store for `GEMINI_API_KEY`; do not put the key in repository files or deploy artifacts. Render supplies `PORT`; the service binds to `0.0.0.0` and runs independently of the development computer.
 
 ## Runtime configuration
 
 | Variable | Required | Meaning |
 | --- | --- | --- |
-| `AI_PROVIDER` | No; defaults to `mock` | `mock`, `openai`, or `anthropic`. Selects a server-side adapter. |
-| `AI_MODEL` | For OpenAI/Anthropic | Provider model identifier. Changing it does not require rebuilding the Android app. |
+| `AI_PROVIDER` | No; defaults to `gemini` | `gemini`, `openai`, `anthropic`, or explicitly `mock`. |
+| `AI_MODEL` | No for Gemini; defaults to `gemini-2.5-flash` | Model identifier. Changing it takes effect after the backend restarts; the Android app does not need a rebuild. Other cloud providers require an explicit model. |
+| `GEMINI_API_KEY` | When provider is `gemini` | Google AI Studio key, read only by the backend and sent in Google's `x-goog-api-key` header. |
 | `OPENAI_API_KEY` | When provider is `openai` | OpenAI secret, read only by the backend. |
 | `ANTHROPIC_API_KEY` | When provider is `anthropic` | Anthropic secret, read only by the backend. |
-| `COMPANION_PERSONALITY` | No | Optional replacement for the backend's default personality instructions. The selected language rule is still appended. |
+| `COMPANION_PERSONALITY` | No | Optional replacement for the default personality instructions; the selected language rule is still appended. |
 | `AI_TIMEOUT_MS` | No; defaults to `20000` | Provider timeout in milliseconds, clamped to 2–60 seconds. |
-| `API_RATE_LIMIT_PER_MINUTE` | No; defaults to `40` | Per-process request limit for an IP address. |
+| `API_RATE_LIMIT_PER_MINUTE` | No; defaults to `40` | Per-process request limit per client IP. |
 | `PORT` | Set by host | HTTP listener port; defaults to `10000` locally. |
 
-For example, set `AI_PROVIDER=openai`, `AI_MODEL` to a model available to your account, and `OPENAI_API_KEY` in the hosting dashboard. To switch providers, set `AI_PROVIDER=anthropic`, choose an available `AI_MODEL`, and set `ANTHROPIC_API_KEY`. Restart/redeploy the service after changing its environment. The Android APK contains only the backend URL; it does not select or name the AI model.
-
-With either cloud provider selected, missing credentials or model configuration are reported as clear configuration errors. The service never silently switches to mock mode. Choose `AI_PROVIDER=mock` explicitly when you want test replies.
+To change models later, set `AI_MODEL` to an identifier available to the configured Google AI Studio project, then restart or redeploy the backend. No fallback model is selected automatically. Google's current model documentation notes access restrictions can apply to Gemini 2.5 models; if the account cannot use `gemini-2.5-flash`, choose an available model explicitly. See [Gemini models](https://ai.google.dev/gemini-api/docs/models).
 
 ## API
 
 ### `GET /healthz`
 
-Returns a process health response:
-
-```json
-{"status":"ok"}
-```
+Returns `{ "status": "ok", "provider": "gemini", "model": "gemini-2.5-flash" }` when the backend is configured. If configuration is incomplete, returns a `503` with a safe error code and message. It never returns credentials.
 
 ### `GET /v1/config`
 
-Returns only public active settings; no provider keys or prompts are returned:
+Returns public active settings only:
 
 ```json
-{"provider":"openai","model":"your-configured-model","language":"tr-TR","maxHistoryMessages":8}
+{"provider":"gemini","model":"gemini-2.5-flash","language":"tr-TR","maxHistoryMessages":8}
 ```
 
 Returns a structured `503` if the provider, model, or required server credential is not configured.
 
 ### `POST /v1/conversations`
 
-`Content-Type: application/json`. The current message is sent separately; `history` contains up to eight earlier user/assistant text messages.
+`Content-Type: application/json`. `history` contains up to eight earlier user/assistant text messages.
 
 ```json
 {
@@ -82,22 +112,17 @@ Returns a structured `503` if the provider, model, or required server credential
 Successful response:
 
 ```json
-{"reply":"Bugün etrafımızdaki küçük bir ayrıntıyı seçelim; sence hangisi bir hikâye saklıyor?","provider":"openai","model":"your-configured-model"}
+{"reply":"Bugün etrafımızdaki küçük bir ayrıntıyı seçelim.","provider":"gemini","model":"gemini-2.5-flash"}
 ```
 
-Local request examples:
+The Gemini adapter sends the personality prompt as a system instruction, maps assistant history to Google's `model` role, and sends user turns as `user` content. It follows Google's [generateContent API](https://ai.google.dev/api/generate-content) and [REST text-generation format](https://ai.google.dev/gemini-api/docs/generate-content/text-generation), using the API-key header. Provider response bodies and conversation content are not logged. Errors normalize credentials, unavailable models, rate limits, quota exhaustion, timeouts, and provider/network failures without returning raw upstream details.
 
-```sh
-curl http://127.0.0.1:10000/v1/config
-curl http://127.0.0.1:10000/v1/conversations \
-  -H 'Content-Type: application/json' \
-  -d '{"message":"Bugün ne keşfedelim?","language":"tr-TR","history":[]}'
-```
+The accepted languages are `tr-TR` (default) and `en-US`. The server validates message sizes, bounds history to eight messages, limits request size and concurrency, and applies a per-process rate limit. Conversation history is supplied by Android and retained there as the last eight messages; the backend is stateless and does not store conversation text or microphone recordings.
 
-`language` is optional and defaults to `tr-TR`; the only accepted values are `tr-TR` and `en-US`. The server validates message sizes, bounds the history, limits request size and per-process concurrency, and rate-limits requests. Provider response bodies and conversation content are not logged. Error responses use `{ "error": { "code": "...", "message": "..." } }` and normalize credential, unsupported-model, rate-limit, timeout, and provider-network errors.
+## Quotas and rate limits
 
-Conversation history is sent from and retained on the Android device as the last eight text messages (four turns). The backend is stateless and does not keep a long-term memory or store microphone recordings.
+Gemini limits vary by model, project, usage tier, region, and account status. Review the active limits in Google AI Studio before deployment; free-tier access and quotas can change and are not guaranteed. Google may return `429` for either request/token rate limits or exhausted quota. The backend reports quota/billing exhaustion as `quota_exceeded` and transient request limits as `rate_limited`; reduce request volume or wait for the applicable limit to reset. See Google's [rate-limit guide](https://ai.google.dev/gemini-api/docs/rate-limits) and [API error codes](https://ai.google.dev/gemini-api/docs/api-errors).
 
 ## Tests
 
-Run `npm test` in `backend/`. Tests use Node's built-in test runner and stub provider HTTP responses; no provider account or API key is needed. They cover the OpenAI and Anthropic request adapters, configuration redaction, conversation/prompt construction, language and input validation, provider errors, and rate limiting. A passing mock test does **not** mean a real provider is configured or reachable.
+Run `npm test` in `backend/`. Tests use Node's built-in test runner and mocked HTTP responses; no provider account or API key is required. They cover Gemini request construction, system instructions, history mapping, response parsing, auth/quota/rate/model errors, configuration defaults and redaction, and the retained OpenAI, Anthropic, and mock adapters. A passing test suite does **not** mean a real Gemini key is configured or that live API connectivity has been verified.

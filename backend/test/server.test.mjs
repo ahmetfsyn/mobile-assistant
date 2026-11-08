@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createConversationServer } from "../src/server.mjs";
+import { createConversationServer, readRuntimeConfig } from "../src/server.mjs";
 
 async function withServer(options, run) {
   const server = createConversationServer(options);
@@ -24,7 +24,7 @@ test("health and config endpoints expose active provider/model but never credent
     const configResponse = await fetch(`${baseUrl}/v1/config`);
     const config = await configResponse.json();
 
-    assert.equal(health.status, "ok");
+    assert.deepEqual(health, { status: "ok", provider: "mock", model: "desk-companion-test" });
     assert.equal(configResponse.status, 200);
     assert.deepEqual(config, {
       provider: "mock",
@@ -33,6 +33,28 @@ test("health and config endpoints expose active provider/model but never credent
       maxHistoryMessages: 8
     });
     assert.equal(JSON.stringify(config).includes("must-not-leak"), false);
+  });
+});
+
+test("Gemini is the default provider and reports missing credentials without secrets", async () => {
+  const config = readRuntimeConfig({});
+  assert.equal(config.provider, "gemini");
+  assert.equal(config.model, "gemini-2.5-flash");
+  assert.equal(config.geminiKey, "");
+
+  await withServer({ env: {} }, async (baseUrl) => {
+    const healthResponse = await fetch(`${baseUrl}/healthz`);
+    const health = await healthResponse.json();
+    const configResponse = await fetch(`${baseUrl}/v1/config`);
+    const configError = await configResponse.json();
+
+    assert.equal(healthResponse.status, 503);
+    assert.equal(health.status, "not_configured");
+    assert.equal(health.error.code, "missing_provider_credentials");
+    assert.match(health.error.message, /GEMINI_API_KEY/);
+    assert.equal(configResponse.status, 503);
+    assert.equal(configError.error.code, "missing_provider_credentials");
+    assert.equal(JSON.stringify(health).includes("secret"), false);
   });
 });
 
@@ -75,6 +97,40 @@ test("conversation uses server-selected provider/model, Turkish personality and 
     assert.equal(providerRequest.body.messages.length, 10);
     assert.equal(providerRequest.body.messages.at(-1).content, "Bugün ne keşfedelim?");
     assert.equal(JSON.stringify(result).includes("server-only-key"), false);
+  });
+});
+
+test("Gemini selection uses the configured model and server-only credential", async () => {
+  let providerRequest;
+  const serverFetch = async (url, options) => {
+    providerRequest = { url, options, body: JSON.parse(options.body) };
+    return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "Merhaba!" }] } }] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    });
+  };
+
+  await withServer({
+    env: { AI_PROVIDER: "gemini", GEMINI_API_KEY: "server-only-gemini-key" },
+    fetchImpl: serverFetch
+  }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/v1/conversations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: "Nasılsın?",
+        history: [{ role: "assistant", content: "Selam!" }]
+      })
+    });
+    const result = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(result, { reply: "Merhaba!", provider: "gemini", model: "gemini-2.5-flash" });
+    assert.equal(providerRequest.url, "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent");
+    assert.equal(providerRequest.options.headers["x-goog-api-key"], "server-only-gemini-key");
+    assert.match(providerRequest.body.systemInstruction.parts[0].text, /Türkçe yanıt ver/);
+    assert.deepEqual(providerRequest.body.contents.map(({ role }) => role), ["model", "user"]);
+    assert.equal(JSON.stringify(result).includes("server-only-gemini-key"), false);
   });
 });
 

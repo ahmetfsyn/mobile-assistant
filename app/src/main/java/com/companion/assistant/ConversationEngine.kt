@@ -255,6 +255,7 @@ internal class HttpConversationEngine(endpoint: String) : ConversationEngine {
             ""
         }
         val message = when {
+            errorCode == "quota_exceeded" -> "AI KOTASI TÜKENDİ; SINIRLAR SIFIRLANINCA YENİDEN DENE"
             code == 429 || errorCode == "rate_limited" -> "AI SAĞLAYICISI ŞU ANDA YOĞUN"
             errorCode == "missing_provider_credentials" -> "BULUT AI KİMLİK BİLGİLERİ YAPILANDIRILMAMIŞ"
             errorCode == "invalid_provider_credentials" -> "BULUT AI KİMLİK BİLGİLERİ GEÇERSİZ"

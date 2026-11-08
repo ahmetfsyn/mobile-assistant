@@ -61,6 +61,78 @@ test("Anthropic adapter translates system and conversation messages to Messages 
   assert.deepEqual(request.body.messages.map(({ role }) => role), ["user", "assistant", "user"]);
 });
 
+test("Gemini adapter builds the official request shape and parses generated text", async () => {
+  let request;
+  const provider = createProvider("gemini", async (url, options) => {
+    request = { url, options, body: JSON.parse(options.body) };
+    return new Response(JSON.stringify({
+      candidates: [{
+        content: { parts: [{ text: "Gizli düşünce", thought: true }, { text: "Seni dinliyorum." }] }
+      }]
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  });
+
+  const reply = await provider.generate({
+    model: "gemini-2.5-flash",
+    apiKey: "gemini-server-secret",
+    messages: [
+      { role: "system", content: "Türkçe, kısa ve sıcak yanıt ver." },
+      { role: "user", content: "Merhaba." },
+      { role: "assistant", content: "Selam!" },
+      { role: "user", content: "Nasılsın?" }
+    ],
+    timeoutMs: 2_000
+  });
+
+  assert.equal(reply, "Seni dinliyorum.");
+  assert.equal(request.url, "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent");
+  assert.equal(request.options.headers["x-goog-api-key"], "gemini-server-secret");
+  assert.equal(request.url.includes("gemini-server-secret"), false);
+  assert.deepEqual(request.body.systemInstruction, { parts: [{ text: "Türkçe, kısa ve sıcak yanıt ver." }] });
+  assert.deepEqual(request.body.contents.map(({ role }) => role), ["user", "model", "user"]);
+  assert.deepEqual(request.body.contents[1].parts, [{ text: "Selam!" }]);
+  assert.equal(request.body.generationConfig.maxOutputTokens, 180);
+});
+
+test("Gemini authentication errors are normalized without leaking upstream details", async () => {
+  const provider = createProvider("gemini", async () => new Response(JSON.stringify({
+    error: { code: 400, status: "INVALID_ARGUMENT", message: "API key not valid: gemini-server-secret" }
+  }), { status: 400 }));
+
+  await assert.rejects(
+    provider.generate({ model: "gemini-2.5-flash", apiKey: "gemini-server-secret", messages: [], timeoutMs: 2_000 }),
+    (error) => error instanceof ProviderError && error.code === "invalid_provider_credentials" &&
+      error.status === 503 && !error.message.includes("gemini-server-secret")
+  );
+});
+
+test("Gemini separates project quota exhaustion from transient rate limiting", async () => {
+  const quotaProvider = createProvider("gemini", async () => new Response(JSON.stringify({
+    error: { code: 429, status: "RESOURCE_EXHAUSTED", message: "You exceeded your current quota." }
+  }), { status: 429 }));
+  const rateProvider = createProvider("gemini", async () => new Response(JSON.stringify({
+    error: { code: 429, status: "RESOURCE_EXHAUSTED", message: "Too many requests per minute." }
+  }), { status: 429 }));
+  const request = { model: "gemini-2.5-flash", apiKey: "test-key", messages: [], timeoutMs: 2_000 };
+
+  await assert.rejects(quotaProvider.generate(request), (error) => error.code === "quota_exceeded" && error.status === 429);
+  await assert.rejects(rateProvider.generate(request), (error) => error.code === "rate_limited" && error.status === 429);
+});
+
+test("Gemini reports unavailable models without silently switching models", async () => {
+  let requestedUrl;
+  const provider = createProvider("gemini", async (url) => {
+    requestedUrl = url;
+    return new Response(JSON.stringify({ error: { status: "NOT_FOUND", message: "model not found" } }), { status: 404 });
+  });
+
+  await assert.rejects(
+    provider.generate({ model: "account-specific-model", apiKey: "test-key", messages: [], timeoutMs: 2_000 }),
+    (error) => error.code === "unsupported_model" && error.status === 503
+  );
+  assert.match(requestedUrl, /account-specific-model:generateContent$/);
+});
+
 test("provider errors are normalized without copying upstream response bodies", async () => {
   const provider = createProvider("openai", async () => new Response("secret provider detail", { status: 401 }));
 

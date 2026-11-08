@@ -17,7 +17,7 @@ Tanıma ve sohbet ağ işlemleri ana iş parçacığının dışında yürür. Y
 
 Bağımsız Node.js servisi `backend/` klasöründedir; üçüncü taraf npm paketi gerektirmez. Yerel test ve servis komutları, sağlayıcı ayarları, Render dağıtımı ve HTTP örnekleri için [`backend/README.md`](backend/README.md) dosyasına bakın.
 
-Servis varsayılan olarak açıkça `mock` sağlayıcıda çalışır. Bu mod gerçek bir AI yanıtı üretmez. OpenAI veya Anthropic kullanmak için servis ortamında sağlayıcı, model ve uygun API anahtarını tanımlayın. API anahtarları yalnızca servis ortamında tutulur; Android kaynaklarına veya APK'ya eklenmez.
+Backend varsayılan olarak `gemini` sağlayıcısını ve `gemini-2.5-flash` modelini kullanır. Yerel kullanımda Google AI Studio'dan alınan anahtarı `backend/.env` içindeki `GEMINI_API_KEY` alanına yazın; Render'da aynı anahtarı Environment Variables bölümünde tanımlayın. Yerel `.env` dosyası Git tarafından yok sayılır. OpenAI, Anthropic ve açıkça seçilen `mock` sağlayıcıları da desteklenir. API anahtarları yalnızca backend ortamında tutulur; Android kaynaklarına veya APK'ya eklenmez. Kurulum, gerçek API isteği, model değiştirme ve kota bilgileri için [`backend/README.md`](backend/README.md) dosyasına bakın.
 
 Android her konuşmada `/v1/config` üzerinden etkin sağlayıcı/model bilgisini alır ve metni `/v1/conversations` adresine yollar. Sağlayıcı ve model değişiklikleri backend ortamı güncellenip servis yeniden başlatıldığında APK'yı yeniden derlemeden geçerli olur.
 
@@ -56,7 +56,8 @@ Varsayılan dil `tr-TR`'dir; Android yalnızca uygulama açıkça İngilizceye g
 - `BULUT SUNUCU ADRESİ HTTPS OLMALI`: HTTPS kök adresi verin.
 - `BULUT AI KİMLİK BİLGİLERİ YAPILANDIRILMAMIŞ`: backend ortamına seçili sağlayıcının API anahtarını ekleyin.
 - `SEÇİLEN AI MODELİ DESTEKLENMİYOR`: sağlayıcı hesabında kullanılabilen bir `AI_MODEL` seçin.
+- `AI KOTASI TÜKENDİ`: Google AI Studio projesinin kota, kullanım sınırı veya faturalandırma durumunu kontrol edin.
 - `İNTERNET BAĞLANTISI YOK` veya zaman aşımı: telefon bağlantısını, servis dağıtımını ve servis sağlayıcı durumunu kontrol edin.
 - AI servisi `mock` görünüyorsa backend `AI_PROVIDER` değerini değiştirip servisi yeniden başlatın.
 
-Gerçek sağlayıcı anahtarı olmadan yapılan backend testleri sadece sahte yanıtları ve adaptör sözleşmelerini doğrular; gerçek AI üretimini doğrulamaz.
+Gerçek sağlayıcı anahtarı olmadan yapılan backend testleri sadece sahte yanıtları ve adaptör sözleşmelerini doğrular; gerçek AI üretimini doğrulamaz. `gemini-2.5-flash` hesaba açık değilse desteklenen bir model adını backend'deki `AI_MODEL` değerine girin; uygulama sessizce başka modele geçmez.

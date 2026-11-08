@@ -1,7 +1,11 @@
 import { createServer as createNodeServer } from "node:http";
-import { pathToFileURL } from "node:url";
-import { resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createProvider, ProviderError } from "./providers.mjs";
+
+const localEnvPath = resolve(dirname(fileURLToPath(import.meta.url)), "../.env");
+if (existsSync(localEnvPath)) process.loadEnvFile(localEnvPath);
 
 const MAX_BODY_BYTES = 24 * 1024;
 const MAX_HISTORY_MESSAGES = 8;
@@ -19,16 +23,18 @@ class ApiError extends Error {
 }
 
 export function readRuntimeConfig(env = process.env) {
-  const provider = String(env.AI_PROVIDER ?? "mock").trim().toLowerCase();
+  const provider = String(env.AI_PROVIDER ?? "gemini").trim().toLowerCase();
   const modelFromEnvironment = String(env.AI_MODEL ?? "").trim();
   const timeout = Number.parseInt(env.AI_TIMEOUT_MS ?? "20000", 10);
   const rateLimit = Number.parseInt(env.API_RATE_LIMIT_PER_MINUTE ?? "40", 10);
+  const defaultModel = provider === "mock" ? "companion-mock" : provider === "gemini" ? "gemini-2.5-flash" : "";
 
   return {
     provider,
-    model: modelFromEnvironment || (provider === "mock" ? "companion-mock" : ""),
+    model: modelFromEnvironment || defaultModel,
     openAiKey: String(env.OPENAI_API_KEY ?? "").trim(),
     anthropicKey: String(env.ANTHROPIC_API_KEY ?? "").trim(),
+    geminiKey: String(env.GEMINI_API_KEY ?? "").trim(),
     personality: String(env.COMPANION_PERSONALITY ?? "").trim(),
     timeoutMs: Number.isFinite(timeout) ? Math.max(2_000, Math.min(timeout, 60_000)) : 20_000,
     rateLimitPerMinute: Number.isFinite(rateLimit) ? Math.max(1, Math.min(rateLimit, 300)) : 40
@@ -36,7 +42,7 @@ export function readRuntimeConfig(env = process.env) {
 }
 
 function configurationError(config) {
-  if (!["mock", "openai", "anthropic"].includes(config.provider)) {
+  if (!["mock", "openai", "anthropic", "gemini"].includes(config.provider)) {
     return new ApiError("unsupported_provider", 503, "The configured provider is not supported.");
   }
   if (!config.model) {
@@ -47,6 +53,9 @@ function configurationError(config) {
   }
   if (config.provider === "anthropic" && !config.anthropicKey) {
     return new ApiError("missing_provider_credentials", 503, "Set ANTHROPIC_API_KEY on the backend.");
+  }
+  if (config.provider === "gemini" && !config.geminiKey) {
+    return new ApiError("missing_provider_credentials", 503, "Set GEMINI_API_KEY on the backend.");
   }
   return null;
 }
@@ -175,7 +184,15 @@ export function createConversationServer({ env = process.env, fetchImpl = global
 
   return createNodeServer(async (request, response) => {
     if (request.method === "GET" && request.url === "/healthz") {
-      sendJson(response, 200, { status: "ok" });
+      const configIssue = configurationError(config);
+      if (configIssue) {
+        sendJson(response, configIssue.status, {
+          status: "not_configured",
+          error: { code: configIssue.code, message: configIssue.message }
+        });
+      } else {
+        sendJson(response, 200, { status: "ok", provider: config.provider, model: config.model });
+      }
       return;
     }
 
@@ -228,7 +245,11 @@ export function createConversationServer({ env = process.env, fetchImpl = global
         ...body.history,
         { role: "user", content: body.message }
       ];
-      const apiKey = config.provider === "openai" ? config.openAiKey : config.anthropicKey;
+      const apiKey = config.provider === "openai"
+        ? config.openAiKey
+        : config.provider === "anthropic"
+          ? config.anthropicKey
+          : config.geminiKey;
       const rawReply = await provider.generate({
         model: config.model,
         apiKey,

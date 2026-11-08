@@ -32,7 +32,7 @@ function providerErrorForStatus(status) {
   );
 }
 
-async function requestJson(fetchImpl, url, init, timeoutMs, callerSignal) {
+async function requestJson(fetchImpl, url, init, timeoutMs, callerSignal, mapError = providerErrorForStatus) {
   const controller = new AbortController();
   const onCallerAbort = () => controller.abort();
   if (callerSignal?.aborted) onCallerAbort();
@@ -41,7 +41,17 @@ async function requestJson(fetchImpl, url, init, timeoutMs, callerSignal) {
 
   try {
     const response = await fetchImpl(url, { ...init, signal: controller.signal });
-    if (!response.ok) throw providerErrorForStatus(response.status);
+    if (!response.ok) {
+      let errorBody;
+      if (mapError !== providerErrorForStatus) {
+        try {
+          errorBody = await response.json();
+        } catch {
+          errorBody = undefined;
+        }
+      }
+      throw mapError(response.status, errorBody);
+    }
     try {
       return await response.json();
     } catch {
@@ -130,6 +140,83 @@ function createAnthropicProvider(fetchImpl) {
   };
 }
 
+function geminiErrorForResponse(status, body) {
+  const upstream = body?.error ?? {};
+  const providerCode = String(upstream.status ?? "").toUpperCase();
+  const message = String(upstream.message ?? "");
+  const detail = `${providerCode} ${message} ${JSON.stringify(upstream.details ?? [])}`.toLowerCase();
+  const modelUnavailable =
+    status === 404 || providerCode === "NOT_FOUND" ||
+    /model.{0,80}(not found|unavailable|does not exist|not supported|not enabled|access denied|permission)/i.test(message) ||
+    /(not available|no access to|permission to use).{0,60}model/i.test(message);
+
+  if (modelUnavailable) {
+    return new ProviderError("unsupported_model", 503, "The configured Gemini model is unavailable for this account.");
+  }
+  if (
+    status === 401 || (status === 403 && !modelUnavailable) ||
+    ["API_KEY_INVALID", "UNAUTHENTICATED", "PERMISSION_DENIED"].includes(providerCode) ||
+    /api.?key.{0,40}(invalid|not valid|unauthorized|permission)/i.test(message)
+  ) {
+    return new ProviderError("invalid_provider_credentials", 503, "The Gemini API key was rejected. Check GEMINI_API_KEY on the server.");
+  }
+  if (status === 429) {
+    if (/quota|billing|daily limit/.test(detail)) {
+      return new ProviderError("quota_exceeded", 429, "The Gemini project quota is exhausted. Check its AI Studio limits and billing settings.");
+    }
+    return new ProviderError("rate_limited", 429, "Gemini is rate limiting requests. Try again shortly.");
+  }
+  if (status >= 500) {
+    return new ProviderError("provider_unavailable", 502, "Gemini is temporarily unavailable.");
+  }
+  return new ProviderError("provider_request_failed", 502, "Gemini could not process the configured request.");
+}
+
+function createGeminiProvider(fetchImpl) {
+  return {
+    async generate({ model, apiKey, messages, timeoutMs, signal }) {
+      const systemInstruction = messages
+        .filter((message) => message.role === "system")
+        .map((message) => message.content)
+        .join("\n\n");
+      const contents = messages
+        .filter((message) => message.role !== "system")
+        .map((message) => ({
+          role: message.role === "assistant" ? "model" : "user",
+          parts: [{ text: message.content }]
+        }));
+      const requestBody = {
+        contents,
+        generationConfig: { maxOutputTokens: 180 }
+      };
+      if (systemInstruction) requestBody.systemInstruction = { parts: [{ text: systemInstruction }] };
+      const response = await requestJson(
+        fetchImpl,
+        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+        {
+          method: "POST",
+          headers: {
+            "x-goog-api-key": apiKey,
+            "Content-Type": "application/json",
+            Accept: "application/json"
+          },
+          body: JSON.stringify(requestBody)
+        },
+        timeoutMs,
+        signal,
+        geminiErrorForResponse
+      );
+      const text = Array.isArray(response?.candidates?.[0]?.content?.parts)
+        ? response.candidates[0].content.parts
+          .filter((part) => typeof part?.text === "string" && part.thought !== true)
+          .map((part) => part.text)
+          .join("\n")
+        : "";
+      return requireText(text);
+    }
+  };
+}
+
 function createMockProvider() {
   return {
     async generate({ language }) {
@@ -148,6 +235,8 @@ export function createProvider(providerName, fetchImpl = globalThis.fetch) {
       return createOpenAiProvider(fetchImpl);
     case "anthropic":
       return createAnthropicProvider(fetchImpl);
+    case "gemini":
+      return createGeminiProvider(fetchImpl);
     default:
       throw new ProviderError("unsupported_provider", 503, "The configured AI provider is not supported.");
   }
