@@ -3,6 +3,12 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val companionBackendUrl = providers.gradleProperty("companionBackendUrl")
+    .orElse(providers.environmentVariable("COMPANION_BACKEND_URL"))
+    .getOrElse("")
+    .replace("\\", "\\\\")
+    .replace("\"", "\\\"")
+
 android {
     namespace = "com.companion.assistant"
     compileSdk = 35
@@ -13,6 +19,11 @@ android {
         targetSdk = 28
         versionCode = 1
         versionName = "0.1.0"
+        buildConfigField("String", "COMPANION_BACKEND_URL", "\"$companionBackendUrl\"")
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 
     compileOptions {

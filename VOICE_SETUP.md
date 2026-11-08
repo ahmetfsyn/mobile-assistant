@@ -1,27 +1,62 @@
-# Sesli iletişim kurulumu
+# Sesli iletişim ve bulut sohbeti kurulumu
 
-## Varsayılan geliştirme modu
+## Konuşma akışı
 
-Yüze kısa dokunma, mikrofon iznini ister ve ardından 16 kHz, mono, 16 bit PCM kaydını başlatır. Yaklaşık 900 ms sessizlik algılandığında kayıt biter; kayıt 15 saniyeyle sınırlıdır. Ses dosyaya yazılmaz. PCM verisi tanıma tamamlanınca bellekten sıfırlanır.
+Yüze kısa dokunma mevcut mikrofon iznini ister ve 16 kHz, mono, 16 bit PCM kaydını başlatır. Yaklaşık 900 ms sessizlik algılandığında kayıt biter; kayıt 15 saniyeyle sınırlıdır. Ses dosyaya yazılmaz ve tanıma tamamlandığında kayıt belleği sıfırlanır.
 
-Bir konuşma tanıma adresi tanımlanmadığında `MockSpeechRecognizer` kullanılır. Bu mod örnek bir Türkçe konuşma metni üretir ve ayarlanabilir deneme yanıtını Android'in yerel TextToSpeech motoruyla seslendirir.
+Uygulama şu sırayı izler:
 
-## Bulut konuşma tanıma
+1. Var olan `SpeechRecognizer` metne çevirir. Bulut tanıma adresi ayarlı değilse geliştirme amaçlı örnek metin üretir.
+2. `ConversationEngine`, son sekiz konuşma mesajıyla birlikte güncel metni AI backend'ine gönderir.
+3. Backend aktif sağlayıcı ve modeli seçer, kısa Türkçe yanıt üretir ve Android'e döndürür.
+4. Var olan Android `TextToSpeech` yanıtı seslendirir.
 
-`VoiceConfig.cloudSpeechEndpoint` alanına sağlayıcınızın HTTPS adresini, erişim belirteci kullanılıyorsa `VoiceConfig.cloudSpeechBearerToken` alanına belirteci aktarın. Gerçek uygulamada kısa ömürlü belirteci güvenli bir sunucu üzerinden alın; API anahtarı uygulama kaynak koduna veya APK'ya eklenmemelidir.
+Tanıma ve sohbet ağ işlemleri ana iş parçacığının dışında yürür. Yeni bir dokunma devam eden konuşmayı iptal eder. Ham ses saklanmaz; son sekiz metin mesajı uygulama özelindeki SharedPreferences alanında tutulur. Uygulama verisini silmek yerel geçmişi de siler.
 
-Uç nokta şu sözleşmeyi kullanır:
+## Bulut backend'i
 
-- `POST` gövdesi: ham PCM, 16 kHz, mono, 16 bit little-endian.
-- `Content-Type`: `audio/pcm; encoding=s16le; rate=16000; channels=1`.
-- `X-Speech-Language`: varsayılan `tr-TR`; İngilizce seçildiğinde `en-US`.
-- İsteğe bağlı `Authorization: Bearer <token>` başlığı.
-- Başarılı yanıt: `{"text":"Tanınan konuşma"}`.
+Bağımsız Node.js servisi `backend/` klasöründedir; üçüncü taraf npm paketi gerektirmez. Yerel test ve servis komutları, sağlayıcı ayarları, Render dağıtımı ve HTTP örnekleri için [`backend/README.md`](backend/README.md) dosyasına bakın.
 
-Bağlantı zaman aşımı 8 saniye, yanıt zaman aşımı 12 saniyedir. Ağ isteği ana iş parçacığının dışında yapılır. AndroidManifest içindeki `INTERNET` izni gerekir.
+Servis varsayılan olarak açıkça `mock` sağlayıcıda çalışır. Bu mod gerçek bir AI yanıtı üretmez. OpenAI veya Anthropic kullanmak için servis ortamında sağlayıcı, model ve uygun API anahtarını tanımlayın. API anahtarları yalnızca servis ortamında tutulur; Android kaynaklarına veya APK'ya eklenmez.
 
-## Dil ve yanıt ayarı
+Android her konuşmada `/v1/config` üzerinden etkin sağlayıcı/model bilgisini alır ve metni `/v1/conversations` adresine yollar. Sağlayıcı ve model değişiklikleri backend ortamı güncellenip servis yeniden başlatıldığında APK'yı yeniden derlemeden geçerli olur.
 
-Varsayılan dil `VoiceConfig.language = VoiceLanguage.TURKISH` değeridir. İngilizce desteğini açıkça seçmek için `VoiceLanguage.ENGLISH` atanabilir. Deneme konuşmaları `VoiceConfig.turkishTestResponse` ve `VoiceConfig.englishTestResponse` alanlarından değiştirilebilir.
+## Android backend adresi
 
-Ses çıkışı Android'in yerel `TextToSpeech` motorunu kullanır. Türkçe veya İngilizce ses verisi cihazda yüklü değilse uygulama başka bir dile kendiliğinden geçmez; Türkçe hata durumu gösterir. Bulut TTS daha sonra `SpeechOutput` arayüzü üzerinden eklenebilir.
+Backend'in HTTPS kök adresini Android derlemesine verin. Adreste API anahtarı veya başka sır bulunmamalıdır:
+
+```sh
+./gradlew assembleDebug -PcompanionBackendUrl=https://your-service.example.com
+```
+
+Alternatif olarak `COMPANION_BACKEND_URL` ortam değişkeni kullanılabilir:
+
+```sh
+COMPANION_BACKEND_URL=https://your-service.example.com ./gradlew assembleDebug
+```
+
+Adres boş bırakılırsa `MockConversationEngine` mevcut yerel test yanıtını kullanır. HTTPS dışında bir adres reddedilir. Sağlayıcı/model bilgisi ve anahtarları APK içinde tutulmaz.
+
+## Mevcut bulut konuşma tanıma adresi
+
+Var olan `HttpSpeechRecognizer`, `VoiceConfig.cloudSpeechEndpoint` alanına verilen HTTPS uç noktasına ham PCM gönderir. İsteğe bağlı bearer belirteci (`cloudSpeechBearerToken`) sağlayıcı anahtarı olmamalı; kısa ömürlü ve güvenli sunucu üzerinden alınmış bir erişim belirteci olmalıdır. Varsayılan boş adres `MockSpeechRecognizer` kullanır. Ayrıntılı istek sözleşmesi `SpeechRecognizer.kt` içindeki açıklamada ve aşağıda özetlenmiştir:
+
+- `POST` gövdesi: 16 kHz, mono, 16 bit little-endian ham PCM.
+- `Content-Type: audio/pcm; encoding=s16le; rate=16000; channels=1`.
+- `X-Speech-Language`: varsayılan `tr-TR`; İngilizce `en-US`.
+- Başarılı JSON yanıtı: `{"text":"Tanınan konuşma"}`.
+- Bağlantı zaman aşımı 8 saniye, yanıt zaman aşımı 12 saniyedir.
+
+Bu AI backend'i sohbet metinlerini işler; mevcut konuşma tanıma adaptörünün yerini almaz. Gerçek mikrofon transkripsiyonu için ayrıca güvenilir HTTPS tanıma adresi gerekir. Bu adres veya bir sağlayıcı anahtarı APK'ya sabitlenmemelidir.
+
+## Dil ve sorun giderme
+
+Varsayılan dil `tr-TR`'dir; Android yalnızca uygulama açıkça İngilizceye geçirildiğinde `en-US` kullanır. Türkçe/İngilizce TTS verisi cihazda yüklü değilse uygulama başka dile geçmek yerine Türkçe hata gösterir.
+
+- `BULUT SUNUCU ADRESİ HTTPS OLMALI`: HTTPS kök adresi verin.
+- `BULUT AI KİMLİK BİLGİLERİ YAPILANDIRILMAMIŞ`: backend ortamına seçili sağlayıcının API anahtarını ekleyin.
+- `SEÇİLEN AI MODELİ DESTEKLENMİYOR`: sağlayıcı hesabında kullanılabilen bir `AI_MODEL` seçin.
+- `İNTERNET BAĞLANTISI YOK` veya zaman aşımı: telefon bağlantısını, servis dağıtımını ve servis sağlayıcı durumunu kontrol edin.
+- AI servisi `mock` görünüyorsa backend `AI_PROVIDER` değerini değiştirip servisi yeniden başlatın.
+
+Gerçek sağlayıcı anahtarı olmadan yapılan backend testleri sadece sahte yanıtları ve adaptör sözleşmelerini doğrular; gerçek AI üretimini doğrulamaz.

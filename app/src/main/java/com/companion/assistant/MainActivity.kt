@@ -28,7 +28,9 @@ class MainActivity : Activity() {
         voiceController = VoiceInteractionController(
             faceView = face,
             speechRecognizer = SpeechRecognizerFactory.create(),
-            speechOutput = TextToSpeechManager(applicationContext)
+            speechOutput = TextToSpeechManager(applicationContext),
+            conversationEngine = ConversationEngineFactory.create(BuildConfig.COMPANION_BACKEND_URL),
+            conversationHistory = SharedPreferencesConversationHistoryStore(applicationContext)
         )
         face.setOnFaceTapListener { onFaceTapped() }
         face.setOnDiagnosticTapListener { openAudioDiagnostics() }

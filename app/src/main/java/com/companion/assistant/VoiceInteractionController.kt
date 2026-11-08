@@ -12,6 +12,8 @@ internal class VoiceInteractionController(
     private val faceView: FaceView,
     private val speechRecognizer: SpeechRecognizer,
     private val speechOutput: SpeechOutput,
+    private val conversationEngine: ConversationEngine,
+    private val conversationHistory: ConversationHistoryStore,
     private val languageProvider: () -> VoiceLanguage = { VoiceConfig.language }
 ) {
     private enum class State { IDLE, LISTENING, PROCESSING, SPEAKING, CLOSED }
@@ -22,8 +24,8 @@ internal class VoiceInteractionController(
         Thread(task, "CompanionSpeechRecognition").apply { isDaemon = true }
     }
 
-    private var state = State.IDLE
-    private var sessionId = 0L
+    @Volatile private var state = State.IDLE
+    @Volatile private var sessionId = 0L
     private var recognitionTask: Future<*>? = null
     private var activeRecording: AudioRecording? = null
 
@@ -92,27 +94,45 @@ internal class VoiceInteractionController(
 
         try {
             recognitionTask = recognitionExecutor.submit {
-                var transcript: String? = null
+                var reply: ConversationReply? = null
+                var recognizedText: String? = null
                 var failure: String? = null
                 try {
-                    transcript = speechRecognizer.recognize(recording, language).trim()
-                    if (transcript.isNullOrEmpty()) failure = "KONUŞMA ANLAŞILAMADI"
+                    val transcript = try {
+                        speechRecognizer.recognize(recording, language).trim()
+                    } finally {
+                        recording.close()
+                    }
+                    if (transcript.isEmpty()) {
+                        failure = "KONUŞMA ANLAŞILAMADI"
+                    } else if (isCurrent(session, State.PROCESSING)) {
+                        recognizedText = transcript
+                        val priorMessages = conversationHistory.recentMessages()
+                        val generatedReply = conversationEngine.respond(transcript, language, priorMessages)
+                        if (isCurrent(session, State.PROCESSING) && generatedReply.text.isNotBlank()) {
+                            reply = generatedReply
+                        } else if (isCurrent(session, State.PROCESSING)) {
+                            failure = "BULUT ASİSTANI BOŞ YANIT VERDİ"
+                        }
+                    }
                 } catch (error: Exception) {
                     if (error is InterruptedException) Thread.currentThread().interrupt()
-                    failure = (error as? SpeechRecognitionFailure)?.message ?: "SES TANIMA BAŞARISIZ"
-                } finally {
-                    recording.close()
+                    failure = when (error) {
+                        is SpeechRecognitionFailure, is ConversationFailure -> error.message ?: "KONUŞMA TAMAMLANAMADI"
+                        else -> "KONUŞMA TAMAMLANAMADI"
+                    }
                 }
 
                 mainHandler.post {
                     if (!isCurrent(session, State.PROCESSING)) return@post
                     activeRecording = null
                     recognitionTask = null
-                    val recognizedText = transcript
-                    if (recognizedText.isNullOrEmpty()) {
-                        fail(session, failure ?: "KONUŞMA ANLAŞILAMADI")
+                    val generatedReply = reply
+                    if (generatedReply == null) {
+                        if (failure != null) fail(session, failure ?: "KONUŞMA TAMAMLANAMADI")
                     } else {
-                        respond(session, recognizedText, language)
+                        recognizedText?.let { conversationHistory.appendTurn(it, generatedReply.text) }
+                        speakResponse(session, generatedReply.text, language)
                     }
                 }
             }
@@ -123,11 +143,10 @@ internal class VoiceInteractionController(
         }
     }
 
-    private fun respond(session: Long, recognizedText: String, language: VoiceLanguage) {
+    private fun speakResponse(session: Long, response: String, language: VoiceLanguage) {
         if (!isCurrent(session, State.PROCESSING)) return
-        Log.i(TAG, "Tanınan konuşma: $recognizedText")
+        Log.i(TAG, "Yanıt hazır (${response.length} karakter).")
 
-        val response = VoiceConfig.testResponse(language)
         state = State.SPEAKING
         faceView.showVoiceSpeaking()
         speechOutput.speak(response, language, object : SpeechOutput.Callback {
@@ -158,6 +177,7 @@ internal class VoiceInteractionController(
     }
 
     private fun cancelSession(showIdle: Boolean) {
+        if (state == State.PROCESSING) conversationEngine.cancelCurrentRequest()
         sessionId++
         audioRecorder.cancel()
         recognitionTask?.cancel(true)
