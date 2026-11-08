@@ -15,24 +15,24 @@ Tanıma ve sohbet ağ işlemleri ana iş parçacığının dışında yürür. Y
 
 ## Bulut backend'i
 
-Bağımsız Node.js servisi `backend/` klasöründedir; üçüncü taraf npm paketi gerektirmez. Yerel test ve servis komutları, sağlayıcı ayarları, Render dağıtımı ve HTTP örnekleri için [`backend/README.md`](backend/README.md) dosyasına bakın.
+Bağımsız Node.js servisi `backend/` klasöründedir; üçüncü taraf npm paketi gerektirmez. Yerel test ve sağlayıcı ayarları için [`backend/README.md`](backend/README.md), Oracle Cloud Ubuntu Docker dağıtımı için [`ORACLE_CLOUD_DEPLOYMENT.md`](ORACLE_CLOUD_DEPLOYMENT.md) dosyasına bakın.
 
-Backend varsayılan olarak `gemini` sağlayıcısını ve `gemini-2.5-flash` modelini kullanır. Yerel kullanımda Google AI Studio'dan alınan anahtarı `backend/.env` içindeki `GEMINI_API_KEY` alanına yazın; Render'da aynı anahtarı Environment Variables bölümünde tanımlayın. Yerel `.env` dosyası Git tarafından yok sayılır. OpenAI, Anthropic ve açıkça seçilen `mock` sağlayıcıları da desteklenir. API anahtarları yalnızca backend ortamında tutulur; Android kaynaklarına veya APK'ya eklenmez. Kurulum, gerçek API isteği, model değiştirme ve kota bilgileri için [`backend/README.md`](backend/README.md) dosyasına bakın.
+Backend varsayılan olarak `gemini` sağlayıcısını ve `gemini-2.5-flash` modelini kullanır. Yerel kullanımda anahtar `backend/.env` içinde, Oracle Cloud'da ise `/etc/masa-arkadasi/.env` içinde tutulur. Sunucudaki anahtar Docker image'a, Git'e veya Android APK'ya eklenmez. OpenAI, Anthropic ve açıkça seçilen `mock` sağlayıcıları da desteklenir. Kurulum, HTTPS, gerçek API isteği, model değiştirme ve kota bilgileri için [`backend/README.md`](backend/README.md) ve [`ORACLE_CLOUD_DEPLOYMENT.md`](ORACLE_CLOUD_DEPLOYMENT.md) dosyalarına bakın.
 
 Android her konuşmada `/v1/config` üzerinden etkin sağlayıcı/model bilgisini alır ve metni `/v1/conversations` adresine yollar. Sağlayıcı ve model değişiklikleri backend ortamı güncellenip servis yeniden başlatıldığında APK'yı yeniden derlemeden geçerli olur.
 
 ## Android backend adresi
 
-Backend'in HTTPS kök adresini Android derlemesine verin. Adreste API anahtarı veya başka sır bulunmamalıdır:
+Backend'in Caddy üzerinden HTTPS kök adresini Android derlemesine verin. Proje bu adresi Gradle özelliği veya `COMPANION_BACKEND_URL` ortam değişkeniyle alır; kaynak koda geçici bir sağlayıcı adresi yazılmaz. Adreste API anahtarı veya başka sır bulunmamalıdır:
 
 ```sh
-./gradlew assembleDebug -PcompanionBackendUrl=https://your-service.example.com
+./gradlew assembleDebug -PcompanionBackendUrl=https://companion.example.com
 ```
 
 Alternatif olarak `COMPANION_BACKEND_URL` ortam değişkeni kullanılabilir:
 
 ```sh
-COMPANION_BACKEND_URL=https://your-service.example.com ./gradlew assembleDebug
+COMPANION_BACKEND_URL=https://companion.example.com ./gradlew assembleDebug
 ```
 
 Adres boş bırakılırsa `MockConversationEngine` mevcut yerel test yanıtını kullanır. HTTPS dışında bir adres reddedilir. Sağlayıcı/model bilgisi ve anahtarları APK içinde tutulmaz.

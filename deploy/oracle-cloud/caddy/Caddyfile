@@ -1,0 +1,4 @@
+# Replace this placeholder with a DNS name that resolves to the server's public IP.
+companion.example.com {
+	reverse_proxy companion-api:3000
+}

@@ -25,6 +25,7 @@ captures/
 .env.*
 !.env.example
 /backend/.env
+/deploy/oracle-cloud/.env
 
 # macOS metadata
 .DS_Store

@@ -42,25 +42,9 @@ curl http://127.0.0.1:10000/v1/conversations \
 
 The last request calls the configured Gemini model. A successful response includes `reply`, `provider`, and `model`. Automated tests use mocked provider HTTP responses; they do not require or verify a real key.
 
-## Deploy to Render
+## Deploy to Oracle Cloud
 
-One lightweight option is a Render **Web Service** backed by this repository:
-
-1. Create a Node web service and select this repository.
-2. Set **Root Directory** to `backend`.
-3. Set **Build Command** to `npm test` and **Start Command** to `npm start`.
-4. Set the health-check path to `/healthz`.
-5. In **Environment** → **Environment Variables**, add:
-
-   | Name | Value |
-   | --- | --- |
-   | `AI_PROVIDER` | `gemini` |
-   | `AI_MODEL` | `gemini-2.5-flash` |
-   | `GEMINI_API_KEY` | Paste the key from Google AI Studio |
-
-6. Deploy the service and copy its HTTPS base URL into the Android build setting in `../VOICE_SETUP.md`.
-
-Use the host's environment-variable secret store for `GEMINI_API_KEY`; do not put the key in repository files or deploy artifacts. Render supplies `PORT`; the service binds to `0.0.0.0` and runs independently of the development computer.
+For the Ubuntu VPS deployment, Docker Compose, Caddy HTTPS, server-side environment file, network rules, and update/recovery commands, follow [`../ORACLE_CLOUD_DEPLOYMENT.md`](../ORACLE_CLOUD_DEPLOYMENT.md). The API container listens on port `3000` inside the Compose network; Caddy is the only service publishing web ports. The Gemini key stays in `/etc/masa-arkadasi/.env` on the server and is excluded from the image and build context.
 
 ## Runtime configuration
 
@@ -74,7 +58,7 @@ Use the host's environment-variable secret store for `GEMINI_API_KEY`; do not pu
 | `COMPANION_PERSONALITY` | No | Optional replacement for the default personality instructions; the selected language rule is still appended. |
 | `AI_TIMEOUT_MS` | No; defaults to `20000` | Provider timeout in milliseconds, clamped to 2–60 seconds. |
 | `API_RATE_LIMIT_PER_MINUTE` | No; defaults to `40` | Per-process request limit per client IP. |
-| `PORT` | Set by host | HTTP listener port; defaults to `10000` locally. |
+| `PORT` | Set by host | HTTP listener port; defaults to `10000` locally and is set to `3000` in the Oracle Compose deployment. |
 
 To change models later, set `AI_MODEL` to an identifier available to the configured Google AI Studio project, then restart or redeploy the backend. No fallback model is selected automatically. Google's current model documentation notes access restrictions can apply to Gemini 2.5 models; if the account cannot use `gemini-2.5-flash`, choose an available model explicitly. See [Gemini models](https://ai.google.dev/gemini-api/docs/models).
 
