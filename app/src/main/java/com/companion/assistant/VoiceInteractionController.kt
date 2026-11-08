@@ -64,6 +64,7 @@ internal class VoiceInteractionController(
         val session = ++sessionId
         state = State.LISTENING
         faceView.showVoiceListening()
+        Log.i(TAG, "Dinleme başladı: oturum=$session")
 
         val started = audioRecorder.start(object : AudioRecorder.Callback {
             override fun onRecordingComplete(recording: AudioRecording) {
@@ -72,6 +73,7 @@ internal class VoiceInteractionController(
                         recording.close()
                         return@post
                     }
+                    Log.i(TAG, "Ses kaydı tamamlandı: oturum=$session")
                     beginRecognition(session, recording)
                 }
             }
@@ -97,6 +99,7 @@ internal class VoiceInteractionController(
                 var reply: ConversationReply? = null
                 var recognizedText: String? = null
                 var failure: String? = null
+                var stage = "speech_recognition"
                 try {
                     val transcript = try {
                         speechRecognizer.recognize(recording, language).trim()
@@ -107,6 +110,8 @@ internal class VoiceInteractionController(
                         failure = "KONUŞMA ANLAŞILAMADI"
                     } else if (isCurrent(session, State.PROCESSING)) {
                         recognizedText = transcript
+                        stage = "conversation"
+                        Log.i(TAG, "Ses tanıma tamamlandı; sohbet isteği başlıyor: oturum=$session")
                         val priorMessages = conversationHistory.recentMessages()
                         val generatedReply = conversationEngine.respond(transcript, language, priorMessages)
                         if (isCurrent(session, State.PROCESSING) && generatedReply.text.isNotBlank()) {
@@ -117,6 +122,9 @@ internal class VoiceInteractionController(
                     }
                 } catch (error: Exception) {
                     if (error is InterruptedException) Thread.currentThread().interrupt()
+                    if (isCurrent(session, State.PROCESSING)) {
+                        Log.w(TAG, "Sesli işlem başarısız: oturum=$session, aşama=$stage, tür=${error.javaClass.simpleName}, neden=${error.cause?.javaClass?.simpleName ?: "yok"}")
+                    }
                     failure = when (error) {
                         is SpeechRecognitionFailure, is ConversationFailure -> error.message ?: "KONUŞMA TAMAMLANAMADI"
                         else -> "KONUŞMA TAMAMLANAMADI"

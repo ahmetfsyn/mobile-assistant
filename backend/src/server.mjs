@@ -1,4 +1,5 @@
 import { createServer as createNodeServer } from "node:http";
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -25,7 +26,8 @@ class ApiError extends Error {
 export function readRuntimeConfig(env = process.env) {
   const provider = String(env.AI_PROVIDER ?? "gemini").trim().toLowerCase();
   const modelFromEnvironment = String(env.AI_MODEL ?? "").trim();
-  const timeout = Number.parseInt(env.AI_TIMEOUT_MS ?? "20000", 10);
+  const defaultTimeoutMs = provider === "gemini" ? 40_000 : 20_000;
+  const timeout = Number.parseInt(env.AI_TIMEOUT_MS ?? String(defaultTimeoutMs), 10);
   const rateLimit = Number.parseInt(env.API_RATE_LIMIT_PER_MINUTE ?? "40", 10);
   const defaultModel = provider === "mock" ? "companion-mock" : provider === "gemini" ? "gemini-2.5-flash" : "";
 
@@ -36,7 +38,7 @@ export function readRuntimeConfig(env = process.env) {
     anthropicKey: String(env.ANTHROPIC_API_KEY ?? "").trim(),
     geminiKey: String(env.GEMINI_API_KEY ?? "").trim(),
     personality: String(env.COMPANION_PERSONALITY ?? "").trim(),
-    timeoutMs: Number.isFinite(timeout) ? Math.max(2_000, Math.min(timeout, 60_000)) : 20_000,
+    timeoutMs: Number.isFinite(timeout) ? Math.max(2_000, Math.min(timeout, 60_000)) : defaultTimeoutMs,
     rateLimitPerMinute: Number.isFinite(rateLimit) ? Math.max(1, Math.min(rateLimit, 300)) : 40
   };
 }
@@ -126,6 +128,7 @@ function sendError(response, error) {
   const apiError = error instanceof ApiError || error instanceof ProviderError
     ? error
     : new ApiError("internal_error", 500, "The request could not be completed.");
+  if (!response.destroyed && !response.writableEnded) response.setHeader("X-Error-Code", apiError.code);
   sendJson(response, apiError.status, {
     error: { code: apiError.code, message: apiError.message }
   });
@@ -171,7 +174,12 @@ function createRateLimiter(limit, now) {
   };
 }
 
-export function createConversationServer({ env = process.env, fetchImpl = globalThis.fetch, now = Date.now } = {}) {
+export function createConversationServer({
+  env = process.env,
+  fetchImpl = globalThis.fetch,
+  now = Date.now,
+  requestLogger = (entry) => console.info(JSON.stringify(entry))
+} = {}) {
   const config = readRuntimeConfig(env);
   let provider;
   try {
@@ -183,6 +191,35 @@ export function createConversationServer({ env = process.env, fetchImpl = global
   let activeGenerations = 0;
 
   return createNodeServer(async (request, response) => {
+    const suppliedId = request.headers["x-request-id"];
+    const requestId = typeof suppliedId === "string" &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(suppliedId)
+      ? suppliedId.toLowerCase()
+      : randomUUID();
+    response.setHeader("X-Request-ID", requestId);
+    const route = request.url === "/v1/conversations" ? "conversation"
+      : request.url === "/v1/config" ? "config"
+        : request.url === "/healthz" ? "health" : "other";
+    if (route !== "health") {
+      const startedAt = Date.now();
+      let reported = false;
+      const report = (outcome) => {
+        if (reported) return;
+        reported = true;
+        requestLogger({
+          event: "http_request",
+          requestId,
+          route,
+          method: request.method,
+          outcome,
+          status: outcome === "completed" ? response.statusCode : null,
+          errorCode: response.getHeader("X-Error-Code") ?? null,
+          durationMs: Date.now() - startedAt
+        });
+      };
+      response.once("finish", () => report("completed"));
+      response.once("close", () => report("disconnected"));
+    }
     if (request.method === "GET" && request.url === "/healthz") {
       const configIssue = configurationError(config);
       if (configIssue) {

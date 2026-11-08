@@ -17,7 +17,7 @@ Tanıma ve sohbet ağ işlemleri ana iş parçacığının dışında yürür. Y
 
 Bağımsız Node.js servisi `backend/` klasöründedir; üçüncü taraf npm paketi gerektirmez. Mac'te Docker Compose ile yerel kullanım ve Android'in aynı Wi-Fi üzerinden bağlanması için [`LOCAL_DOCKER_BACKEND.md`](LOCAL_DOCKER_BACKEND.md), sağlayıcı ayarları için [`backend/README.md`](backend/README.md), Oracle Cloud Ubuntu Docker dağıtımı için [`ORACLE_CLOUD_DEPLOYMENT.md`](ORACLE_CLOUD_DEPLOYMENT.md) dosyasına bakın.
 
-Backend varsayılan olarak `gemini` sağlayıcısını ve `gemini-2.5-flash` modelini kullanır. Yerel kullanımda anahtar `backend/.env` içinde, Oracle Cloud'da ise `/etc/masa-arkadasi/.env` içinde tutulur. Sunucudaki anahtar Docker image'a, Git'e veya Android APK'ya eklenmez. OpenAI, Anthropic ve açıkça seçilen `mock` sağlayıcıları da desteklenir. Yerel HTTP yalnızca güvenilir özel Wi-Fi ağında kullanılmalıdır; internetten erişim veya modem port yönlendirmesi için değildir.
+Backend varsayılan olarak `gemini` sağlayıcısını ve `gemini-2.5-flash` modelini kullanır. Mac'teki Docker Compose servisi, daha hızlı yerel konuşma için açıkça `gemini-3.5-flash-lite` modelini seçer; `COMPANION_LOCAL_MODEL` ile değiştirilebilir. Yerel kullanımda anahtar `backend/.env` içinde, Oracle Cloud'da ise `/etc/masa-arkadasi/.env` içinde tutulur. Sunucudaki anahtar Docker image'a, Git'e veya Android APK'ya eklenmez. OpenAI, Anthropic ve açıkça seçilen `mock` sağlayıcıları da desteklenir. Yerel HTTP yalnızca güvenilir özel Wi-Fi ağında kullanılmalıdır; internetten erişim veya modem port yönlendirmesi için değildir.
 
 Android her konuşmada `/v1/config` üzerinden etkin sağlayıcı/model bilgisini alır ve metni `/v1/conversations` adresine yollar. Sağlayıcı ve model değişiklikleri backend ortamı güncellenip servis yeniden başlatıldığında APK'yı yeniden derlemeden geçerli olur.
 
@@ -58,6 +58,8 @@ Varsayılan dil `tr-TR`'dir; Android yalnızca uygulama açıkça İngilizceye g
 - `BULUT AI KİMLİK BİLGİLERİ YAPILANDIRILMAMIŞ`: backend ortamına seçili sağlayıcının API anahtarını ekleyin.
 - `SEÇİLEN AI MODELİ DESTEKLENMİYOR`: sağlayıcı hesabında kullanılabilen bir `AI_MODEL` seçin.
 - `AI KOTASI TÜKENDİ`: Google AI Studio projesinin kota, kullanım sınırı veya faturalandırma durumunu kontrol edin.
+- `AI SAĞLAYICISI ZAMAN AŞIMINA UĞRADI`: backend Gemini yanıtını belirtilen süre içinde alamadı; Docker günlüklerindeki `provider_timeout` kodunu ve aynı istek kimliğini kontrol edin.
+- `AI YANITI YARIM KALDI; TEKRAR DENE`: Gemini çıktı sınırına ulaştı; yarım yanıt seslendirilmez.
 - `İNTERNET BAĞLANTISI YOK` veya zaman aşımı: telefon bağlantısını, servis dağıtımını ve servis sağlayıcı durumunu kontrol edin.
 - AI servisi `mock` görünüyorsa backend `AI_PROVIDER` değerini değiştirip servisi yeniden başlatın.
 

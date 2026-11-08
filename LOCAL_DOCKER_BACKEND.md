@@ -13,7 +13,7 @@ The local `.env` file is read by Docker Compose and passed to the container as e
    cp backend/.env.example backend/.env
    ```
 
-3. Add the Gemini key to `backend/.env` and keep `AI_PROVIDER=gemini`, `AI_MODEL=gemini-2.5-flash`, and `PORT=3000`. Keep this local file private and untracked.
+3. Add the Gemini key to `backend/.env` and keep `AI_PROVIDER=gemini`. Keep this local file private and untracked. Compose sets `PORT=3000` and selects `gemini-3.5-flash-lite` for the local service. Its `AI_MODEL` setting takes precedence over an `AI_MODEL` line in the local `.env` file. This stable model is listed by Google for the Gemini Developer API free tier and responded quickly in the device integration diagnosis.
 
 The Compose service has a health check against `/healthz`, restarts unless explicitly stopped, and keeps rotated container logs. If the API key is empty or invalid, `/healthz` reports that the service is not configured and Compose marks it unhealthy.
 
@@ -56,6 +56,13 @@ Changing application code requires `MAC_LOCAL_IP="$(ipconfig getifaddr en0)" doc
 MAC_LOCAL_IP="$(ipconfig getifaddr en0)" docker compose up -d --force-recreate companion-api
 ```
 
+To select another available model explicitly for the local service, set `COMPANION_LOCAL_MODEL` when recreating the container. Use the same value on later `docker compose up` commands so Compose keeps that model:
+
+```sh
+COMPANION_LOCAL_MODEL=gemini-3.8-flash MAC_LOCAL_IP="$(ipconfig getifaddr en0)" \
+  docker compose up -d --force-recreate companion-api
+```
+
 ## Connect the Android phone over local Wi-Fi
 
 Keep the Mac powered on, Docker Desktop running, and the Mac and phone connected to the same private Wi-Fi network. Find the Mac's Wi-Fi IPv4 address with:
@@ -87,6 +94,35 @@ If the Mac receives a different Wi-Fi address, recreate the container using the 
 ```sh
 MAC_LOCAL_IP="$(ipconfig getifaddr en0)" docker compose up -d --force-recreate companion-api
 ```
+
+## Diagnose Android and Gemini
+
+Check the public configuration and send a synthetic request from the Mac. The last command calls the configured Gemini model and may use its quota:
+
+```sh
+curl --fail "http://$(ipconfig getifaddr en0):3000/healthz"
+curl --fail "http://$(ipconfig getifaddr en0):3000/v1/config"
+curl --fail "http://$(ipconfig getifaddr en0):3000/v1/conversations" \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"Kısa bir bağlantı testi yanıtı ver.","language":"tr-TR","history":[]}'
+```
+
+The Android test APK includes a device probe that uses the same `ConversationEngine` as the animated face. Replace `MAC_LOCAL_IP` and `YOUR_ADB_SERIAL` before running these commands. The optional `conversation` argument sends one real Gemini request without microphone input or TTS:
+
+```sh
+./gradlew assembleDebug assembleDebugAndroidTest -PcompanionBackendUrl=http://MAC_LOCAL_IP:3000
+PHONE_SERIAL=YOUR_ADB_SERIAL
+adb -s "$PHONE_SERIAL" install -r app/build/outputs/apk/debug/app-debug.apk
+adb -s "$PHONE_SERIAL" install -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+adb -s "$PHONE_SERIAL" shell am instrument -w -e conversation true \
+  com.companion.assistant.test/com.companion.assistant.BackendProbeInstrumentation
+adb -s "$PHONE_SERIAL" logcat -d -v brief 'VoiceInteraction:V' '*:S'
+docker compose logs --tail=50 companion-api
+```
+
+Compare `X-Request-ID` values in Logcat and Docker logs. Logs contain status and normalized error codes, not conversation text or API keys. A configuration probe alone omits `-e conversation true`. A real voice test still needs someone to tap the face and speak near the phone. The current speech recognizer is a development mock unless a separate HTTPS recognition endpoint is configured; it supplies a fixed Turkish sample transcript after actual audio is detected.
+
+`gemini-3.8-flash` is a valid Google model, but repeated local requests timed out while `gemini-3.5-flash-lite` completed a synthetic request quickly. The local Compose default therefore favors the tested faster model. See Google's [model list](https://ai.google.dev/gemini-api/docs/models) and [pricing/free-tier table](https://ai.google.dev/gemini-api/docs/pricing) for current availability and quota details.
 
 ## Portability
 

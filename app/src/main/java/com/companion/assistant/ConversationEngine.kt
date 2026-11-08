@@ -5,12 +5,16 @@ import android.util.Log
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
+import java.net.ConnectException
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.MalformedURLException
+import java.net.NoRouteToHostException
 import java.net.SocketTimeoutException
 import java.net.URL
 import java.net.UnknownHostException
+import java.net.UnknownServiceException
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
 
 internal data class ConversationMessage(val role: String, val content: String)
@@ -198,6 +202,9 @@ internal class HttpConversationEngine(endpoint: String) : ConversationEngine {
         if (url.userInfo != null || url.query != null || url.ref != null) {
             throw ConversationFailure("BULUT SUNUCU ADRESİ KİMLİK BİLGİSİ İÇERMEMELİ")
         }
+        val requestId = UUID.randomUUID().toString()
+        val route = if (path == "/v1/config") "config" else "conversation"
+        Log.i(TAG, "HTTP başladı: id=$requestId, yol=$route")
 
         val connection = try {
             url.openConnection() as? HttpURLConnection
@@ -205,6 +212,7 @@ internal class HttpConversationEngine(endpoint: String) : ConversationEngine {
         } catch (error: ConversationFailure) {
             throw error
         } catch (error: Exception) {
+            Log.w(TAG, "HTTP bağlantı açılamadı: id=$requestId, tür=${error.javaClass.simpleName}")
             throw ConversationFailure("BULUT SUNUCUSUNA BAĞLANILAMADI", error)
         }
         activeConnection = connection
@@ -214,6 +222,7 @@ internal class HttpConversationEngine(endpoint: String) : ConversationEngine {
             connection.readTimeout = readTimeoutMs
             connection.requestMethod = method
             connection.setRequestProperty("Accept", "application/json")
+            connection.setRequestProperty("X-Request-ID", requestId)
             if (body != null) {
                 connection.doOutput = true
                 connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
@@ -223,6 +232,7 @@ internal class HttpConversationEngine(endpoint: String) : ConversationEngine {
             }
 
             val code = connection.responseCode
+            Log.i(TAG, "HTTP yanıtı: id=$requestId, yol=$route, durum=$code")
             val stream = if (code in 200..299) connection.inputStream else connection.errorStream
             val responseText = stream?.bufferedReader(Charsets.UTF_8)?.use { reader ->
                 val result = StringBuilder()
@@ -237,17 +247,30 @@ internal class HttpConversationEngine(endpoint: String) : ConversationEngine {
                 }
                 result.toString()
             }.orEmpty()
-            if (code !in 200..299) throw serverFailure(code, responseText)
+            if (code !in 200..299) throw serverFailure(code, responseText, requestId)
             return JSONObject(responseText)
         } catch (error: SocketTimeoutException) {
-            throw ConversationFailure("YANIT ZAMAN AŞIMINA UĞRADI")
+            Log.w(TAG, "HTTP zaman aşımı: id=$requestId, yol=$route")
+            throw ConversationFailure("SUNUCU YANITI ZAMAN AŞIMINA UĞRADI", error)
         } catch (error: UnknownHostException) {
-            throw ConversationFailure("İNTERNET BAĞLANTISI YOK")
+            Log.w(TAG, "HTTP adresi bulunamadı: id=$requestId, yol=$route")
+            throw ConversationFailure("SUNUCU ADRESİ BULUNAMADI", error)
+        } catch (error: ConnectException) {
+            Log.w(TAG, "HTTP bağlantısı reddedildi: id=$requestId, yol=$route")
+            throw ConversationFailure("SUNUCU BAĞLANTIYI KABUL ETMEDİ", error)
+        } catch (error: NoRouteToHostException) {
+            Log.w(TAG, "HTTP ağ yolu bulunamadı: id=$requestId, yol=$route")
+            throw ConversationFailure("YEREL AĞDA SUNUCUYA ULAŞILAMADI", error)
+        } catch (error: UnknownServiceException) {
+            Log.w(TAG, "HTTP bağlantısına izin verilmedi: id=$requestId, yol=$route")
+            throw ConversationFailure("HTTP BAĞLANTISINA İZİN VERİLMİYOR", error)
         } catch (error: JSONException) {
+            Log.w(TAG, "HTTP JSON yanıtı geçersiz: id=$requestId, yol=$route")
             throw ConversationFailure("BULUT SUNUCUSU YANITI OKUNAMADI", error)
         } catch (error: ConversationFailure) {
             throw error
         } catch (error: IOException) {
+            Log.w(TAG, "HTTP aktarımı başarısız: id=$requestId, yol=$route, tür=${error.javaClass.simpleName}")
             throw ConversationFailure("BULUT ASİSTANINA ULAŞILAMADI", error)
         } finally {
             if (activeConnection === connection) activeConnection = null
@@ -255,12 +278,16 @@ internal class HttpConversationEngine(endpoint: String) : ConversationEngine {
         }
     }
 
-    private fun serverFailure(code: Int, body: String): ConversationFailure {
+    private fun serverFailure(code: Int, body: String, requestId: String): ConversationFailure {
         val errorCode = try {
             JSONObject(body).optJSONObject("error")?.optString("code").orEmpty()
         } catch (_: JSONException) {
             ""
         }
+        val diagnosticCode = errorCode.takeIf { value ->
+            value.length in 1..64 && value.all { it in 'a'..'z' || it in '0'..'9' || it == '_' }
+        } ?: "bilinmiyor"
+        Log.w(TAG, "Backend hatası: id=$requestId, durum=$code, kod=$diagnosticCode")
         val message = when {
             errorCode == "quota_exceeded" -> "AI KOTASI TÜKENDİ; SINIRLAR SIFIRLANINCA YENİDEN DENE"
             code == 429 || errorCode == "rate_limited" -> "AI SAĞLAYICISI ŞU ANDA YOĞUN"
@@ -268,6 +295,12 @@ internal class HttpConversationEngine(endpoint: String) : ConversationEngine {
             errorCode == "invalid_provider_credentials" -> "BULUT AI KİMLİK BİLGİLERİ GEÇERSİZ"
             errorCode == "unsupported_model" -> "SEÇİLEN AI MODELİ DESTEKLENMİYOR"
             errorCode == "unsupported_provider" -> "AI SAĞLAYICISI DESTEKLENMİYOR"
+            errorCode == "provider_timeout" || code == 504 -> "AI SAĞLAYICISI ZAMAN AŞIMINA UĞRADI"
+            errorCode == "provider_unavailable" -> "AI SAĞLAYICISI GEÇİCİ OLARAK YANIT VERMİYOR"
+            errorCode == "incomplete_provider_response" -> "AI YANITI YARIM KALDI; TEKRAR DENE"
+            errorCode == "empty_provider_response" -> "AI BOŞ YANIT VERDİ; TEKRAR DENE"
+            errorCode == "invalid_provider_response" -> "AI YANITI OKUNAMADI"
+            errorCode == "provider_request_failed" -> "AI İSTEĞİ İŞLENEMEDİ"
             code == 503 -> "BULUT ASİSTANI HAZIR DEĞİL"
             code in 400..499 -> "BULUT İSTEĞİ KABUL EDİLMEDİ"
             else -> "BULUT ASİSTANINA ŞU ANDA ULAŞILAMIYOR"
@@ -276,9 +309,10 @@ internal class HttpConversationEngine(endpoint: String) : ConversationEngine {
     }
 
     private companion object {
+        const val TAG = "VoiceInteraction"
         const val CONNECT_TIMEOUT_MS = 7_000
         const val CONFIG_READ_TIMEOUT_MS = 5_000
-        const val CHAT_READ_TIMEOUT_MS = 25_000
+        const val CHAT_READ_TIMEOUT_MS = 45_000
         const val MAX_RESPONSE_CHARS = 64 * 1024
         const val MAX_HISTORY_MESSAGES = 8
 

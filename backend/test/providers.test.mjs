@@ -91,7 +91,30 @@ test("Gemini adapter builds the official request shape and parses generated text
   assert.deepEqual(request.body.systemInstruction, { parts: [{ text: "Türkçe, kısa ve sıcak yanıt ver." }] });
   assert.deepEqual(request.body.contents.map(({ role }) => role), ["user", "model", "user"]);
   assert.deepEqual(request.body.contents[1].parts, [{ text: "Selam!" }]);
-  assert.equal(request.body.generationConfig.maxOutputTokens, 180);
+  assert.equal(request.body.generationConfig.maxOutputTokens, 1_024);
+  assert.equal(request.body.generationConfig.thinkingConfig, undefined);
+});
+
+test("Gemini 3.8 Flash uses low thinking and rejects truncated responses", async () => {
+  let requestBody;
+  const provider = createProvider("gemini", async (_url, options) => {
+    requestBody = JSON.parse(options.body);
+    return new Response(JSON.stringify({
+      candidates: [{ finishReason: "MAX_TOKENS", content: { parts: [{ text: "Yarım kalmış" }] } }]
+    }), { status: 200 });
+  });
+
+  await assert.rejects(
+    provider.generate({
+      model: "gemini-3.8-flash",
+      apiKey: "server-test-secret",
+      messages: [{ role: "user", content: "Merhaba" }],
+      timeoutMs: 2_000
+    }),
+    (error) => error instanceof ProviderError && error.code === "incomplete_provider_response" && error.status === 502
+  );
+  assert.equal(requestBody.generationConfig.maxOutputTokens, 1_024);
+  assert.deepEqual(requestBody.generationConfig.thinkingConfig, { thinkingLevel: "low" });
 });
 
 test("Gemini authentication errors are normalized without leaking upstream details", async () => {

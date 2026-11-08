@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createConversationServer, readRuntimeConfig } from "../src/server.mjs";
 
 async function withServer(options, run) {
-  const server = createConversationServer(options);
+  const server = createConversationServer({ requestLogger: () => {}, ...options });
   await new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(0, "127.0.0.1", resolve);
@@ -15,6 +15,36 @@ async function withServer(options, run) {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 }
+
+test("request IDs and diagnostic logs expose status without secrets or message text", async () => {
+  const entries = [];
+  const requestId = "a1b2c3d4-0000-4000-8000-123456789abc";
+  await withServer({
+    env: { AI_PROVIDER: "mock", GEMINI_API_KEY: "server-only-secret" },
+    requestLogger: (entry) => entries.push(entry)
+  }, async (baseUrl) => {
+    const config = await fetch(`${baseUrl}/v1/config`, { headers: { "X-Request-ID": requestId } });
+    assert.equal(config.headers.get("X-Request-ID"), requestId);
+    assert.equal(config.status, 200);
+
+    const invalid = await fetch(`${baseUrl}/v1/conversations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Request-ID": requestId },
+      body: JSON.stringify({ message: "private synthetic message", language: "unsupported" })
+    });
+    assert.equal(invalid.status, 400);
+    assert.equal(invalid.headers.get("X-Error-Code"), "unsupported_language");
+  });
+
+  assert.equal(entries.length, 2);
+  assert.deepEqual(entries.map((entry) => [entry.route, entry.status, entry.errorCode]), [
+    ["config", 200, null],
+    ["conversation", 400, "unsupported_language"]
+  ]);
+  assert.ok(entries.every((entry) => entry.requestId === requestId && entry.durationMs >= 0));
+  assert.equal(JSON.stringify(entries).includes("server-only-secret"), false);
+  assert.equal(JSON.stringify(entries).includes("private synthetic message"), false);
+});
 
 test("health and config endpoints expose active provider/model but never credentials", async () => {
   await withServer({
@@ -41,6 +71,7 @@ test("Gemini is the default provider and reports missing credentials without sec
   assert.equal(config.provider, "gemini");
   assert.equal(config.model, "gemini-2.5-flash");
   assert.equal(config.geminiKey, "");
+  assert.equal(config.timeoutMs, 40_000);
 
   await withServer({ env: {} }, async (baseUrl) => {
     const healthResponse = await fetch(`${baseUrl}/healthz`);

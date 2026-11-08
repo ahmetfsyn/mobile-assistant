@@ -20,6 +20,7 @@ android {
         versionCode = 1
         versionName = "0.1.0"
         buildConfigField("String", "COMPANION_BACKEND_URL", "\"$companionBackendUrl\"")
+        testInstrumentationRunner = "com.companion.assistant.BackendProbeInstrumentation"
     }
 
     buildFeatures {

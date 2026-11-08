@@ -44,7 +44,7 @@ The last request calls the configured Gemini model. A successful response includ
 
 ## Run locally with Docker Compose
 
-For the macOS local Docker setup, Android LAN connection instructions, health checks, logs, and rebuild commands, see [`../LOCAL_DOCKER_BACKEND.md`](../LOCAL_DOCKER_BACKEND.md). The root `compose.yaml` reuses this backend Dockerfile, reads `backend/.env`, and publishes port `3000` for devices on the same trusted private network.
+For the macOS local Docker setup, Android LAN connection instructions, health checks, logs, and rebuild commands, see [`../LOCAL_DOCKER_BACKEND.md`](../LOCAL_DOCKER_BACKEND.md). The root `compose.yaml` reuses this backend Dockerfile, reads `backend/.env`, and publishes port `3000` for devices on the same trusted private network. The local Compose service explicitly selects `gemini-3.5-flash-lite` unless `COMPANION_LOCAL_MODEL` is set; this local setting takes precedence over `AI_MODEL` in `backend/.env`.
 
 ## Deploy to Oracle Cloud
 
@@ -60,7 +60,7 @@ For the Ubuntu VPS deployment, Docker Compose, Caddy HTTPS, server-side environm
 | `OPENAI_API_KEY` | When provider is `openai` | OpenAI secret, read only by the backend. |
 | `ANTHROPIC_API_KEY` | When provider is `anthropic` | Anthropic secret, read only by the backend. |
 | `COMPANION_PERSONALITY` | No | Optional replacement for the default personality instructions; the selected language rule is still appended. |
-| `AI_TIMEOUT_MS` | No; defaults to `20000` | Provider timeout in milliseconds, clamped to 2–60 seconds. |
+| `AI_TIMEOUT_MS` | No; defaults to `40000` for Gemini and `20000` for other providers | Provider timeout in milliseconds, clamped to 2–60 seconds. Android waits 45 seconds for a conversation response. |
 | `API_RATE_LIMIT_PER_MINUTE` | No; defaults to `40` | Per-process request limit per client IP. |
 | `PORT` | Set by host | HTTP listener port; defaults to `10000` locally and is set to `3000` in the Oracle Compose deployment. |
 
@@ -104,6 +104,8 @@ Successful response:
 ```
 
 The Gemini adapter sends the personality prompt as a system instruction, maps assistant history to Google's `model` role, and sends user turns as `user` content. It follows Google's [generateContent API](https://ai.google.dev/api/generate-content) and [REST text-generation format](https://ai.google.dev/gemini-api/docs/generate-content/text-generation), using the API-key header. Provider response bodies and conversation content are not logged. Errors normalize credentials, unavailable models, rate limits, quota exhaustion, timeouts, and provider/network failures without returning raw upstream details.
+
+For `gemini-3.8-flash`, the adapter requests low thinking effort and allows up to 1024 output tokens, including thinking tokens. It rejects `MAX_TOKENS` responses instead of speaking an incomplete fragment. Other configured Gemini models keep their own thinking defaults. The model remains configurable through `AI_MODEL`; the service never switches it silently. Request logs contain only a request ID, route, method, HTTP status, normalized error code, and duration. The Android client sends the same `X-Request-ID` so Logcat and Docker logs can be matched without logging transcripts, replies, audio, or keys.
 
 The accepted languages are `tr-TR` (default) and `en-US`. The server validates message sizes, bounds history to eight messages, limits request size and concurrency, and applies a per-process rate limit. Conversation history is supplied by Android and retained there as the last eight messages; the backend is stateless and does not store conversation text or microphone recordings.
 

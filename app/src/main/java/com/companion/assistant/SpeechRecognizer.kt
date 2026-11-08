@@ -1,5 +1,6 @@
 package com.companion.assistant
 
+import android.util.Log
 import org.json.JSONObject
 import java.io.IOException
 import java.net.HttpURLConnection
@@ -115,8 +116,10 @@ internal object SpeechRecognizerFactory {
     fun create(): SpeechRecognizer {
         val endpoint = VoiceConfig.cloudSpeechEndpoint.trim()
         return if (endpoint.isEmpty()) {
+            Log.i("VoiceInteraction", "Ses tanıma deneme kipinde; kayıt örnek metne dönüştürülecek.")
             MockSpeechRecognizer()
         } else {
+            Log.i("VoiceInteraction", "HTTPS ses tanıma servisi seçildi.")
             HttpSpeechRecognizer(endpoint, VoiceConfig.cloudSpeechBearerToken.trim())
         }
     }

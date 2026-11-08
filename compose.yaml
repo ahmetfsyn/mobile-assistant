@@ -13,6 +13,7 @@ services:
     environment:
       HOST: 0.0.0.0
       PORT: "3000"
+      AI_MODEL: ${COMPANION_LOCAL_MODEL:-gemini-3.5-flash-lite}
     ports:
       - "${MAC_LOCAL_IP:-127.0.0.1}:3000:3000/tcp"
     healthcheck:

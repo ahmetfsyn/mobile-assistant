@@ -185,9 +185,13 @@ function createGeminiProvider(fetchImpl) {
           role: message.role === "assistant" ? "model" : "user",
           parts: [{ text: message.content }]
         }));
+      const generationConfig = { maxOutputTokens: 1_024 };
+      if (model === "gemini-3.8-flash") {
+        generationConfig.thinkingConfig = { thinkingLevel: "low" };
+      }
       const requestBody = {
         contents,
-        generationConfig: { maxOutputTokens: 180 }
+        generationConfig
       };
       if (systemInstruction) requestBody.systemInstruction = { parts: [{ text: systemInstruction }] };
       const response = await requestJson(
@@ -206,6 +210,9 @@ function createGeminiProvider(fetchImpl) {
         signal,
         geminiErrorForResponse
       );
+      if (response?.candidates?.[0]?.finishReason === "MAX_TOKENS") {
+        throw new ProviderError("incomplete_provider_response", 502, "Gemini stopped before completing its reply.");
+      }
       const text = Array.isArray(response?.candidates?.[0]?.content?.parts)
         ? response.candidates[0].content.parts
           .filter((part) => typeof part?.text === "string" && part.thought !== true)
