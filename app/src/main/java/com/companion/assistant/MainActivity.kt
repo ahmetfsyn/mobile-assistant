@@ -15,9 +15,6 @@ class MainActivity : Activity() {
 
     private var faceView: FaceView? = null
     private var voiceController: VoiceInteractionController? = null
-    private var audioDiagnosticView: AudioDiagnosticView? = null
-    private var audioDiagnosticController: AudioOutputDiagnosticController? = null
-    private var showingAudioDiagnostics = false
     private var microphonePermissionRequestPending = false
     private var robotCore: RobotCore? = null
 
@@ -50,7 +47,6 @@ class MainActivity : Activity() {
             onCaptionChanged = face::setCaption
         )
         face.setOnFaceTapListener { onFaceTapped() }
-        face.setOnDiagnosticTapListener { openAudioDiagnostics() }
         setContentView(face)
         dispatchRobotEvent(RobotEvent.BootCompleted)
         dispatchRobotEvent(RobotEvent.MicrophonePermissionChanged(hasMicrophonePermission()))
@@ -63,7 +59,7 @@ class MainActivity : Activity() {
         if (!microphonePermissionRequestPending) {
             dispatchRobotEvent(RobotEvent.MicrophonePermissionChanged(hasMicrophonePermission()))
         }
-        if (!showingAudioDiagnostics) faceView?.start()
+        faceView?.start()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -73,17 +69,8 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         dispatchRobotEvent(RobotEvent.HostPaused)
-        closeAudioDiagnostics(showFace = true, restartFace = false)
         faceView?.stop()
         super.onPause()
-    }
-
-    override fun onBackPressed() {
-        if (showingAudioDiagnostics) {
-            closeAudioDiagnostics(showFace = true, restartFace = true)
-        } else {
-            super.onBackPressed()
-        }
     }
 
     override fun onRequestPermissionsResult(
@@ -103,13 +90,11 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
-        closeAudioDiagnostics(showFace = false, restartFace = false)
         dispatchRobotEvent(RobotEvent.CloseRequested)
         voiceController?.close()
         voiceController = null
         mainHandler.removeCallbacksAndMessages(null)
         robotCore = null
-        faceView?.setOnDiagnosticTapListener(null)
         faceView?.destroy()
         faceView = null
         super.onDestroy()
@@ -171,45 +156,6 @@ class MainActivity : Activity() {
             RobotActivityState.OBSERVING,
             RobotActivityState.ACTING,
             RobotActivityState.CLOSED -> Unit
-        }
-    }
-
-    private fun openAudioDiagnostics() {
-        if (showingAudioDiagnostics) return
-
-        dispatchRobotEvent(RobotEvent.CancelActiveInteraction)
-        faceView?.stop()
-        showingAudioDiagnostics = true
-
-        val diagnosticView = AudioDiagnosticView(this, object : AudioDiagnosticView.Listener {
-            override fun onOutputSelected(output: AudioDiagnosticView.Output) {
-                audioDiagnosticController?.testOutput(output)
-            }
-
-            override fun onReturnToFace() {
-                closeAudioDiagnostics(showFace = true, restartFace = true)
-            }
-        })
-        audioDiagnosticView = diagnosticView
-        audioDiagnosticController = AudioOutputDiagnosticController(this, diagnosticView::showStatus)
-        setContentView(diagnosticView)
-        applyImmersiveFullscreen()
-    }
-
-    private fun closeAudioDiagnostics(showFace: Boolean, restartFace: Boolean) {
-        if (!showingAudioDiagnostics && audioDiagnosticController == null && audioDiagnosticView == null) return
-
-        audioDiagnosticController?.close()
-        audioDiagnosticController = null
-        audioDiagnosticView = null
-        showingAudioDiagnostics = false
-
-        if (showFace) {
-            faceView?.let { face ->
-                setContentView(face)
-                applyImmersiveFullscreen()
-                if (restartFace) face.start()
-            }
         }
     }
 
