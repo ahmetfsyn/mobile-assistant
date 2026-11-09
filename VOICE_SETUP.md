@@ -41,7 +41,11 @@ Adres boş bırakılırsa `MockConversationEngine` mevcut yerel test yanıtını
 
 ## Konuşma tanıma seçimi
 
-Normal yapılandırmada `VoiceConfig.cloudSpeechEndpoint` boş kalır ve Android'in kurulu `SpeechRecognizer` servisi kullanılır. İstek dili varsayılan `tr-TR` olarak ayarlanır, serbest biçimli konuşma istenir ve `EXTRA_PREFER_OFFLINE` tercihi gönderilir. Bu tercih bir garanti değildir: bazı Android tanıma servisleri ağı kullanır, çevrimdışı Türkçe paketi sunmayabilir veya `tr-TR` dilini desteklemeyebilir. Böyle durumlarda uygulama sabit bir cümleyle devam etmek yerine servis, ağ, izin veya konuşma algılama hatasını gösterir. Dil otomatik olarak İngilizceye çevrilmez.
+Normal yapılandırmada `VoiceConfig.cloudSpeechEndpoint` boş kalır ve Android'in kurulu `SpeechRecognizer` servisi kullanılır. İstek dili varsayılan `tr-TR` olarak ayarlanır ve serbest biçimli konuşma istenir. `EXTRA_PREFER_OFFLINE` varsayılan olarak `false` bırakılır; Android bu değeri `true` yaptığında yalnızca çevrimdışı motor kullanılmasını ister. GM 5 Plus'taki önceki Logcat kaydı (`Offline recognizer - start listening` ardından `Soda recognizer failed to initialize: ConfigStatus 3`) çevrimdışı motorun yapılandırılamayıp servisin kapanmasıyla uyumlu. Varsayılan normal mod, Google servisine kendi ağ/çevrimdışı seçimini yapma fırsatı verir.
+
+Yalnızca `tr-TR` çevrimdışı modelinin cihazda kurulu olduğu doğrulandıysa `VoiceConfig.preferOfflineSpeechRecognition = true` olarak ayarlayın. Bu kipte henüz konuşma algılanmadan `ERROR_CLIENT` veya `ERROR_SERVER_DISCONNECTED` gelirse uygulama tanıyıcıyı temizler ve ağ kullanımına izin veren **tek** kurtarma denemesi yapar. Normal kipte de bu iki hata konuşma başlamadan gelirse servis bir kez yeniden oluşturulur; sonrasında hata kullanıcıya gösterilir. Busy, timeout, no-match, izin, ağ kotası ve servis hataları ayrı açıklanır. Otomatik döngü veya boş transkript gönderimi yoktur; dil İngilizceye çevrilmez.
+
+Tanıma oturum kimliği, servis oluşturma/başlatma, konuşma başlangıç/bitiş, tanıma sonucu, hata kodu/açıklaması, kurtarma ve kaynak temizliği `VoiceInteraction` Logcat etiketiyle yazılır; ses ve tanınan cümleler loglanmaz.
 
 Android servisinin cihazda bulunup bulunmadığını ve gerçek Türkçe tanıma kalitesini fiziksel cihazda kontrol edin. Uçak modu veya Wi-Fi kapalı denemesi, seçili servisin çevrimdışı dil modelini gerçekten kullanabildiğini gösterir. Servis yoksa, `KONUŞMA TANIMA SERVİSİ BULUNAMADI` hatası gösterilir.
 

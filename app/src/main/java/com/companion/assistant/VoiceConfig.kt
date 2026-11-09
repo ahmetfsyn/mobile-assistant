@@ -23,6 +23,10 @@ internal object VoiceConfig {
     @Volatile
     var useMockSpeechRecognition: Boolean = false
 
+    /** Android defines true as offline-only; enable only after confirming an installed tr-TR model. */
+    @Volatile
+    var preferOfflineSpeechRecognition: Boolean = false
+
     @Volatile
     var mockTurkishTranscription: String = "Merhaba, nasılsın?"
 
