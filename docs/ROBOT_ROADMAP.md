@@ -1,6 +1,6 @@
 # Phased Robot Roadmap
 
-This roadmap is a sequence of **small, separately reversible deliveries**, not authorization to implement them all. Complexity is a rough one-engineer estimate after the specified dependencies are available; device-specific investigation and hardware procurement can dominate it. Every phase keeps the existing face, tap-to-talk, provider-neutral backend, local Docker route, Turkish default, and API 24 build working. Phase 1 is implemented. Phase 2's platform adapter is implemented, with physical-device acceptance still open; later phases remain planned.
+This roadmap is a sequence of **small, separately reversible deliveries**, not authorization to implement them all. Complexity is a rough one-engineer estimate after the specified dependencies are available; device-specific investigation and hardware procurement can dominate it. Every phase keeps the existing face, tap-to-talk, provider-neutral backend, local Docker route, Turkish default, and API 24 build working. Phase 1 is implemented. Phase 2's platform adapter is implemented, with physical-device acceptance still open. Phase 4's local personality/emotion implementation is in place; visual and spoken-quality review on the GM 5 Plus remains open. Phase 3 reliability soak and all later phases remain planned.
 
 ## Priority and gates
 
@@ -11,7 +11,7 @@ This roadmap is a sequence of **small, separately reversible deliveries**, not a
 | 1 | Robot Core and policy seams — complete | Medium, ~1–2 weeks | No | Yes |
 | 2 | Real Turkish STT — adapter implemented; device acceptance open | Medium–high, ~1–3 weeks | No | Yes if platform/Vosk path passes; service behavior must be verified |
 | 3 | Robust turn-taking and interruption | Medium, ~1–2 weeks | No | Yes |
-| 4 | Personality and bounded emotion | Medium, ~1–2 weeks | No | Yes locally; Gemini usage remains quota-dependent |
+| 4 | Personality and bounded emotion — implemented; device review open | Medium, ~1–2 weeks | No | Yes locally; Gemini usage remains quota-dependent |
 | 5 | Consented persistent memory | High, ~2–4 weeks | No; backup storage optional | Yes locally |
 | 6 | Controlled autonomy and reminders | High, ~2–3 weeks | No | Yes if local-only triggers; optional Gemini calls must respect free quota |
 | 7 | Opt-in vision | High, ~2–4 weeks | No if phone camera geometry works | Yes for basic motion; ML may need host resources |
@@ -46,6 +46,10 @@ This roadmap is a sequence of **small, separately reversible deliveries**, not a
 - **Dependencies/expected components:** Phase 1 state snapshots and stable voice; `PersonalityProfile`, `EmotionReducer`, `FaceCueMapper`, backend prompt builder tests. Reuse `FaceBehavior` and `FaceAnimator`.
 - **Acceptance/testing:** Same trigger yields consistent bounded cue; idle decay returns to calm; model text cannot alter permissions/emotion state directly; accessibility/voice intelligibility preserved; rendering remains event-driven. Deterministic reducer tests and visual/device review.
 - **Risk/cost:** Conflicting automatic eye behavior and Core cues; define override precedence. Medium; local logic 0 TL, optional Gemini replies quota-dependent.
+
+### Phase 4 implementation status (2026-11-09)
+
+Implemented the versioned Turkish-first `masa-arkadasi` profile, a local bounded five-axis emotion reducer with lazy exponential decay, deterministic mapping to existing eye expressions, and subtle capped native TTS delivery adjustments. Trusted voice lifecycle events are the only mood inputs; face voice/touch/sleep behavior keeps precedence, and emotion updates do not run a frame loop. The backend prompt builder now keeps language and truthful-capability boundaries even when `COMPANION_PERSONALITY` supplies a custom style. Automated reducer and prompt tests cover bounds, deterministic mapping, decay, delivery caps, and profile rules. GM 5 Plus visual/TTS quality review remains open.
 
 ## Phase 5 — Persistent memory and privacy controls
 

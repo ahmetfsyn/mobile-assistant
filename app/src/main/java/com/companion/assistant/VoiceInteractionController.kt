@@ -2,6 +2,7 @@ package com.companion.assistant
 
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -17,7 +18,9 @@ internal class VoiceInteractionController(
     private val conversationEngine: ConversationEngine,
     private val conversationHistory: ConversationHistoryStore,
     private val languageProvider: () -> VoiceLanguage = { VoiceConfig.language },
-    private val onCaptionChanged: (String?) -> Unit = {}
+    private val onCaptionChanged: (String?) -> Unit = {},
+    private val personalityProfile: PersonalityProfile = PersonalityProfile.DEFAULT,
+    private val onFaceCueChanged: (FaceCue) -> Unit = {}
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val recognitionExecutor: ExecutorService = Executors.newSingleThreadExecutor { task ->
@@ -29,6 +32,14 @@ internal class VoiceInteractionController(
     @Volatile private var activeInteractionId: String? = null
     private var recognitionTask: Future<*>? = null
     private var activeRecording: AudioRecording? = null
+    private val emotionReducer = EmotionReducer()
+    private var emotionState = EmotionState.CALM
+    private val emotionDecayRunnable = Runnable {
+        if (!closed) {
+            emotionState = emotionReducer.decay(emotionState, SystemClock.elapsedRealtime())
+            onFaceCueChanged(FaceCueMapper.map(emotionState))
+        }
+    }
 
     fun startListening(sessionId: Long) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
@@ -37,8 +48,10 @@ internal class VoiceInteractionController(
         }
         if (closed || !robotCore.isCurrent(sessionId, RobotActivityState.LISTENING)) return
         activeSessionId = sessionId
+        mainHandler.removeCallbacks(emotionDecayRunnable)
         val interactionId = UUID.randomUUID().toString()
         activeInteractionId = interactionId
+        applyEmotionEvent(EmotionEvent.INTERACTION_STARTED)
         onCaptionChanged(null)
         val language = languageProvider()
         Log.i(TAG, "recognition_session_started interactionId=$interactionId session=$sessionId language=${language.tag}")
@@ -88,6 +101,7 @@ internal class VoiceInteractionController(
     fun close() {
         if (closed) return
         closed = true
+        mainHandler.removeCallbacks(emotionDecayRunnable)
         activeSessionId?.let(::cancelSessionOnClose)
         speechInput.close()
         recognitionExecutor.shutdownNow()
@@ -176,6 +190,7 @@ internal class VoiceInteractionController(
             return
         }
         if (!robotCore.isCurrent(session, RobotActivityState.THINKING)) return
+        applyEmotionEvent(EmotionEvent.TRANSCRIPT_RECEIVED)
         onCaptionChanged(transcript)
 
         Log.i(
@@ -229,6 +244,7 @@ internal class VoiceInteractionController(
                     if (generatedReply == null) {
                         reportFailure(session, failure ?: "KONUŞMA TAMAMLANAMADI")
                     } else {
+                        applyEmotionEvent(EmotionEvent.RESPONSE_RECEIVED)
                         onCaptionChanged(generatedReply.text)
                         Log.i(
                             TAG,
@@ -254,7 +270,11 @@ internal class VoiceInteractionController(
             !robotCore.isCurrent(session, RobotActivityState.SPEAKING)
         ) return
 
-        speechOutput.speak(response, language, object : SpeechOutput.Callback {
+        speechOutput.speak(
+            response,
+            language,
+            personalityProfile.voiceDeliveryFor(emotionState),
+            object : SpeechOutput.Callback {
             override fun onStarted() {
                 Log.i(
                     TAG,
@@ -264,10 +284,14 @@ internal class VoiceInteractionController(
             }
 
             override fun onCompleted() = dispatchOnMain {
+                if (closed || activeSessionId != session || activeInteractionId != interactionId) {
+                    return@dispatchOnMain
+                }
                 if (activeSessionId == session && activeInteractionId == interactionId) {
                     activeSessionId = null
                     activeInteractionId = null
                 }
+                applyEmotionEvent(EmotionEvent.INTERACTION_FINISHED, scheduleDecay = true)
                 Log.i(TAG, "tts_playback_completed interactionId=$interactionId session=$session")
                 robotCore.dispatch(RobotEvent.SpeechCompleted(session))
             }
@@ -283,6 +307,7 @@ internal class VoiceInteractionController(
         if (closed || robotCore.snapshot.sessionId != session) return
         if (robotCore.snapshot.activity !in VOICE_STATES) return
         Log.w(TAG, "interaction_failed interactionId=${activeInteractionId ?: "unknown"} session=$session")
+        applyEmotionEvent(EmotionEvent.INTERACTION_FAILED, scheduleDecay = true)
         speechInput.cancel()
         recognitionTask?.cancel(true)
         recognitionTask = null
@@ -313,8 +338,18 @@ internal class VoiceInteractionController(
         else mainHandler.post(block)
     }
 
+    private fun applyEmotionEvent(event: EmotionEvent, scheduleDecay: Boolean = false) {
+        emotionState = emotionReducer.reduce(emotionState, event, SystemClock.elapsedRealtime())
+        onFaceCueChanged(FaceCueMapper.map(emotionState))
+        mainHandler.removeCallbacks(emotionDecayRunnable)
+        if (scheduleDecay && !closed) {
+            mainHandler.postDelayed(emotionDecayRunnable, EMOTION_DECAY_REFRESH_MS)
+        }
+    }
+
     private companion object {
         const val TAG = "VoiceInteraction"
+        const val EMOTION_DECAY_REFRESH_MS = 22_000L
         val VOICE_STATES = setOf(
             RobotActivityState.LISTENING,
             RobotActivityState.THINKING,

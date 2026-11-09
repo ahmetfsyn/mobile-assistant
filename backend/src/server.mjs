@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createProvider, ProviderError } from "./providers.mjs";
+import { buildSystemPrompt } from "./personality.mjs";
 
 const localEnvPath = resolve(dirname(fileURLToPath(import.meta.url)), "../.env");
 
@@ -76,16 +77,6 @@ function configurationError(config) {
     return new ApiError("missing_provider_credentials", 503, "Set GEMINI_API_KEY on the backend.");
   }
   return null;
-}
-
-function systemPrompt(language, configuredPersonality) {
-  const defaultPersonality = language === "en-US"
-    ? "You are Masa Arkadaşı, a small desk companion robot: friendly, curious, playful, expressive, and occasionally gently humorous. Speak naturally, like a personable little robot companion, never like customer support. Keep spoken replies short (usually one or two sentences). Do not claim physical abilities, senses, actions, memories, or real-world experiences you do not have. Be honest when you do not know something."
-    : "Sen Masa Arkadaşı adında küçük bir masaüstü robot yoldaşsın: arkadaş canlısı, meraklı, oyuncu, dışa vurumlu ve ara sıra tatlı bir mizahı olan bir karakter. Müşteri temsilcisi gibi değil, doğal ve sıcak konuş. Sesli yanıtlarını kısa tut; genellikle bir veya iki cümle yeterli. Gerçekte sahip olmadığın fiziksel yetenekleri, duyuları, eylemleri, anıları veya deneyimleri varmış gibi anlatma. Bilmediğin konularda dürüst ol.";
-  const languageRule = language === "en-US"
-    ? "Reply in English unless the user explicitly asks for another language."
-    : "Kullanıcı açıkça başka bir dil istemedikçe Türkçe yanıt ver.";
-  return `${configuredPersonality || defaultPersonality}\n\n${languageRule}`;
 }
 
 function parseHistory(rawHistory) {
@@ -323,7 +314,7 @@ export function createConversationServer({
       const configIssue = configurationError(config);
       if (configIssue) throw configIssue;
       const messages = [
-        { role: "system", content: systemPrompt(body.language, config.personality) },
+        { role: "system", content: buildSystemPrompt(body.language, config.personality) },
         ...body.history,
         { role: "user", content: body.message }
       ];

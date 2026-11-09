@@ -119,6 +119,8 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
 
     fun finishVoiceInteraction() = behavior.finishVoiceInteraction()
 
+    internal fun setEmotionCue(cue: FaceCue) = behavior.setEmotionCue(cue)
+
     /** Shows the latest user transcript or spoken reply without persisting it. */
     fun setCaption(text: String?) {
         caption = text?.trim()?.take(MAX_CAPTION_CHARS).orEmpty()

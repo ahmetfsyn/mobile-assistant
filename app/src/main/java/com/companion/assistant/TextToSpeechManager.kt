@@ -19,6 +19,9 @@ internal interface SpeechOutput : Closeable {
     }
 
     fun speak(text: String, language: VoiceLanguage, callback: Callback)
+    fun speak(text: String, language: VoiceLanguage, delivery: VoiceDelivery, callback: Callback) {
+        speak(text, language, callback)
+    }
     fun stop()
 }
 
@@ -27,6 +30,7 @@ internal class TextToSpeechManager(context: Context) : SpeechOutput {
     private data class PendingSpeech(
         val text: String,
         val language: VoiceLanguage,
+        val delivery: VoiceDelivery,
         val callback: SpeechOutput.Callback
     )
 
@@ -57,8 +61,17 @@ internal class TextToSpeechManager(context: Context) : SpeechOutput {
     }
 
     override fun speak(text: String, language: VoiceLanguage, callback: SpeechOutput.Callback) {
+        speak(text, language, VoiceDelivery.DEFAULT, callback)
+    }
+
+    override fun speak(
+        text: String,
+        language: VoiceLanguage,
+        delivery: VoiceDelivery,
+        callback: SpeechOutput.Callback
+    ) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
-            mainHandler.post { speak(text, language, callback) }
+            mainHandler.post { speak(text, language, delivery, callback) }
             return
         }
         if (closed) {
@@ -75,10 +88,10 @@ internal class TextToSpeechManager(context: Context) : SpeechOutput {
                 callback.onError("KONUŞMA MOTORU BAŞLATILAMADI")
                 return
             }
-            pending = PendingSpeech(text, language, callback)
+            pending = PendingSpeech(text, language, delivery.bounded(), callback)
             return
         }
-        speakReady(text, language, callback)
+        speakReady(text, language, delivery.bounded(), callback)
     }
 
     override fun stop() {
@@ -161,10 +174,15 @@ internal class TextToSpeechManager(context: Context) : SpeechOutput {
         ready = true
         val queued = pending
         pending = null
-        if (queued != null) speakReady(queued.text, queued.language, queued.callback)
+        if (queued != null) speakReady(queued.text, queued.language, queued.delivery, queued.callback)
     }
 
-    private fun speakReady(text: String, language: VoiceLanguage, callback: SpeechOutput.Callback) {
+    private fun speakReady(
+        text: String,
+        language: VoiceLanguage,
+        delivery: VoiceDelivery,
+        callback: SpeechOutput.Callback
+    ) {
         val tts = engine ?: run {
             callback.onError("KONUŞMA MOTORU KULLANILAMIYOR")
             return
@@ -181,6 +199,9 @@ internal class TextToSpeechManager(context: Context) : SpeechOutput {
         }
 
         stop()
+        val boundedDelivery = delivery.bounded()
+        tts.setSpeechRate(boundedDelivery.speechRate)
+        tts.setPitch(boundedDelivery.pitch)
         val utteranceId = "companion-${utteranceSequence.incrementAndGet()}"
         currentCallback = callback
         currentUtteranceId = utteranceId

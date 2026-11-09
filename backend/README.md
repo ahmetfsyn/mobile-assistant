@@ -59,7 +59,7 @@ For the Ubuntu VPS deployment, Docker Compose, Caddy HTTPS, server-side environm
 | `GEMINI_API_KEY` | When provider is `gemini` | Google AI Studio key, read only by the backend and sent in Google's `x-goog-api-key` header. |
 | `OPENAI_API_KEY` | When provider is `openai` | OpenAI secret, read only by the backend. |
 | `ANTHROPIC_API_KEY` | When provider is `anthropic` | Anthropic secret, read only by the backend. |
-| `COMPANION_PERSONALITY` | No | Optional replacement for the default personality instructions; the selected language rule is still appended. |
+| `COMPANION_PERSONALITY` | No | Optional style instructions. The selected language and truthful-capability rules are always appended. |
 | `AI_TIMEOUT_MS` | No; defaults to `40000` for Gemini and `20000` for other providers | Provider timeout in milliseconds, clamped to 2–60 seconds. Android waits 45 seconds for a conversation response. |
 | `API_RATE_LIMIT_PER_MINUTE` | No; defaults to `40` | Per-process request limit per client IP. |
 | `PORT` | Set by host | HTTP listener port; defaults to `10000` locally and is set to `3000` in the Oracle Compose deployment. |

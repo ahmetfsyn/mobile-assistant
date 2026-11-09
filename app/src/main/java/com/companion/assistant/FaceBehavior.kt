@@ -23,6 +23,7 @@ internal class FaceBehavior(
     private var lastInteraction = SystemClock.uptimeMillis()
     private var currentExpression = FaceExpression.NEUTRAL
     private var snoozeTriggered = false
+    private var preferredEmotionCue = FaceCueMapper.map(EmotionState.CALM)
 
     private val idleRunnable = Runnable { runIdleBehavior() }
     private val blinkRunnable = Runnable { runBlink() }
@@ -139,10 +140,15 @@ internal class FaceBehavior(
         handler.postDelayed(voiceErrorReturnRunnable, 1800L)
     }
 
+    /** Stores a locally derived cue; active voice, touch, and sleep expressions keep precedence. */
+    fun setEmotionCue(cue: FaceCue) {
+        preferredEmotionCue = cue
+    }
+
     fun finishVoiceInteraction() {
         handler.removeCallbacks(voiceErrorReturnRunnable)
         voiceInteractionActive = false
-        show(FaceExpression.NEUTRAL, "HAZIRIM", 560L)
+        show(preferredEmotionCue.expression, preferredEmotionCue.status, 560L)
         scheduleIdle(1400L)
     }
 
@@ -201,7 +207,7 @@ internal class FaceBehavior(
     private fun returnToNeutral() {
         if (!running || touchHeld || voiceInteractionActive) return
         if (currentExpression == FaceExpression.SLEEPING || currentExpression == FaceExpression.SLEEPY) return
-        show(FaceExpression.NEUTRAL, "BURADAYIM", 620L)
+        show(preferredEmotionCue.expression, preferredEmotionCue.status, 620L)
         if (Random.nextFloat() < 0.5f) {
             listener.moveGaze(randomGazeX() * 0.6f, randomGazeY() * 0.6f, 700L)
         }

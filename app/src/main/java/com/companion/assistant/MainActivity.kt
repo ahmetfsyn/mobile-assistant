@@ -44,7 +44,8 @@ class MainActivity : Activity() {
             speechOutput = TextToSpeechManager(applicationContext),
             conversationEngine = ConversationEngineFactory.create(BuildConfig.COMPANION_BACKEND_URL),
             conversationHistory = SharedPreferencesConversationHistoryStore(applicationContext),
-            onCaptionChanged = face::setCaption
+            onCaptionChanged = face::setCaption,
+            onFaceCueChanged = face::setEmotionCue
         )
         face.setOnFaceTapListener { onFaceTapped() }
         setContentView(face)
