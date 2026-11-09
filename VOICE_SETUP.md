@@ -2,11 +2,13 @@
 
 ## Konuşma akışı
 
-Yüze kısa dokunma mevcut mikrofon iznini ister ve 16 kHz, mono, 16 bit PCM kaydını başlatır. Yaklaşık 900 ms sessizlik algılandığında kayıt biter; kayıt 15 saniyeyle sınırlıdır. Ses dosyaya yazılmaz ve tanıma tamamlandığında kayıt belleği sıfırlanır.
+Yüze kısa dokunma mevcut mikrofon iznini ister ve varsayılan olarak Android'in kurulu konuşma tanıma servisini `tr-TR` diliyle açar. Android 7.0'daki platform servisi kendi mikrofon oturumunu yönetir ve son metni uygulamaya döndürür. Uygulama çevrimdışı tanımayı tercih ettiğini bildirir; servis bu tercihi yok sayabilir ve ağ isteyebilir. Türkçe desteği, indirilmiş dil paketi ve çevrimdışı çalışma cihazdaki tanıma hizmetine bağlıdır.
+
+Yapılandırılmış bir HTTPS PCM uç noktası varsa uygulama bunun yerine 16 kHz, mono, 16 bit PCM kaydeder; yaklaşık 900 ms sessizlikte durur ve kayıt 15 saniyeyle sınırlıdır. Bu yolda ses yalnızca bellekte tutulur, ağ tanıması bitince bellek temizlenir ve dosyaya yazılmaz. Hiçbir yolda uygulama içinde sabit örnek cümle varsayılan olarak kullanılmaz. Ham ses Android'in seçili konuşma servisi tarafından işlenebilir; bu servisin ağ ve gizlilik davranışı uygulamanın kontrolünde değildir.
 
 Uygulama şu sırayı izler:
 
-1. Var olan `SpeechRecognizer` metne çevirir. Bulut tanıma adresi ayarlı değilse geliştirme amaçlı örnek metin üretir.
+1. Varsayılan Android sistem tanıyıcısı, cihazın servisinin sağladığı gerçek metni döndürür. İsteğe bağlı HTTPS PCM tanıyıcısı da seçilebilir.
 2. `ConversationEngine`, son sekiz konuşma mesajıyla birlikte güncel metni AI backend'ine gönderir.
 3. Backend aktif sağlayıcı ve modeli seçer, kısa Türkçe yanıt üretir ve Android'e döndürür.
 4. Var olan Android `TextToSpeech` yanıtı seslendirir.
@@ -37,9 +39,17 @@ COMPANION_BACKEND_URL=http://MAC_LOCAL_IP:3000 ./gradlew assembleDebug
 
 Adres boş bırakılırsa `MockConversationEngine` mevcut yerel test yanıtını kullanır. HTTPS her yerde kabul edilir; HTTP yalnızca `10.0.0.0/8`, `172.16.0.0/12` veya `192.168.0.0/16` özel IPv4 adreslerinde kabul edilir. Sağlayıcı/model bilgisi ve anahtarları APK içinde tutulmaz.
 
-## Mevcut bulut konuşma tanıma adresi
+## Konuşma tanıma seçimi
 
-Var olan `HttpSpeechRecognizer`, `VoiceConfig.cloudSpeechEndpoint` alanına verilen HTTPS uç noktasına ham PCM gönderir. İsteğe bağlı bearer belirteci (`cloudSpeechBearerToken`) sağlayıcı anahtarı olmamalı; kısa ömürlü ve güvenli sunucu üzerinden alınmış bir erişim belirteci olmalıdır. Varsayılan boş adres `MockSpeechRecognizer` kullanır. Ayrıntılı istek sözleşmesi `SpeechRecognizer.kt` içindeki açıklamada ve aşağıda özetlenmiştir:
+Normal yapılandırmada `VoiceConfig.cloudSpeechEndpoint` boş kalır ve Android'in kurulu `SpeechRecognizer` servisi kullanılır. İstek dili varsayılan `tr-TR` olarak ayarlanır, serbest biçimli konuşma istenir ve `EXTRA_PREFER_OFFLINE` tercihi gönderilir. Bu tercih bir garanti değildir: bazı Android tanıma servisleri ağı kullanır, çevrimdışı Türkçe paketi sunmayabilir veya `tr-TR` dilini desteklemeyebilir. Böyle durumlarda uygulama sabit bir cümleyle devam etmek yerine servis, ağ, izin veya konuşma algılama hatasını gösterir. Dil otomatik olarak İngilizceye çevrilmez.
+
+Android servisinin cihazda bulunup bulunmadığını ve gerçek Türkçe tanıma kalitesini fiziksel cihazda kontrol edin. Uçak modu veya Wi-Fi kapalı denemesi, seçili servisin çevrimdışı dil modelini gerçekten kullanabildiğini gösterir. Servis yoksa, `KONUŞMA TANIMA SERVİSİ BULUNAMADI` hatası gösterilir.
+
+Geliştirme sırasında sabit test transkripsiyonunu açıkça seçmek için `VoiceConfig.useMockSpeechRecognition = true` ayarlayın. Bu kip yalnızca geliştirme içindir; varsayılan kapalıdır. HTTPS PCM adresi yapılandırılmışsa PCM adresi mock ayarından önceliklidir.
+
+## İsteğe bağlı HTTPS PCM konuşma tanıma adresi
+
+`HttpSpeechRecognizer`, `VoiceConfig.cloudSpeechEndpoint` alanına verilen HTTPS uç noktasına ham PCM gönderir. İsteğe bağlı bearer belirteci (`cloudSpeechBearerToken`) sağlayıcı anahtarı olmamalı; kısa ömürlü ve güvenli sunucu üzerinden alınmış bir erişim belirteci olmalıdır. Ayrıntılı istek sözleşmesi `SpeechRecognizer.kt` içindeki açıklamada ve aşağıda özetlenmiştir:
 
 - `POST` gövdesi: 16 kHz, mono, 16 bit little-endian ham PCM.
 - `Content-Type: audio/pcm; encoding=s16le; rate=16000; channels=1`.
@@ -47,7 +57,7 @@ Var olan `HttpSpeechRecognizer`, `VoiceConfig.cloudSpeechEndpoint` alanına veri
 - Başarılı JSON yanıtı: `{"text":"Tanınan konuşma"}`.
 - Bağlantı zaman aşımı 8 saniye, yanıt zaman aşımı 12 saniyedir.
 
-Bu AI backend'i sohbet metinlerini işler; mevcut konuşma tanıma adaptörünün yerini almaz. Gerçek mikrofon transkripsiyonu için ayrıca güvenilir HTTPS tanıma adresi gerekir. Bu adres veya bir sağlayıcı anahtarı APK'ya sabitlenmemelidir.
+Bu AI backend'i sohbet metinlerini işler. Varsayılan gerçek mikrofon transkripsiyonu Android sistem servisindedir; özel bir HTTPS PCM tanıma uç noktası isteğe bağlıdır. Bu uç nokta veya sağlayıcı anahtarı APK'ya sabitlenmemelidir.
 
 ## Dil ve sorun giderme
 

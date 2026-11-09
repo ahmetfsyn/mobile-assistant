@@ -22,7 +22,7 @@ Status: D-01 is implemented as a limited Android state foundation. Other decisio
 ## Current gaps that must not be hidden by planning language
 
 - Robot Core is a small state/effect foundation. It does not yet own FaceBehavior's autonomous eye/sleep timers, perform actions/observations, or persist consent settings.
-- The default STT is a fixed mock response after actual audio capture. No current backend STT route exists.
+- The default Android platform STT adapter is implemented, but actual Turkish recognition, installed service availability, and Wi-Fi-off behavior are unverified on the GM 5 Plus. No current backend STT route exists.
 - The backend has no device authentication, durable robot database, autonomous scheduler, tool executor, or hardware gateway.
 - The Android app has no camera permission or vision pipeline. Current face idle behavior is local character animation, not environment-aware autonomy.
 - Current local Compose chooses `gemini-3.5-flash-lite`; bare backend configuration defaults to `gemini-2.5-flash`. Both are external services whose free-tier rules may change. The Android build with no backend URL uses a mock conversation reply.

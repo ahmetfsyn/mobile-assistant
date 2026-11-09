@@ -176,8 +176,19 @@ internal class RobotCore(
         }
 
         is RobotEvent.TranscriptReady -> {
-            if (!event.hasText && isCurrent(event.sessionId, RobotActivityState.THINKING)) {
-                showError("KONUŞMA ANLAŞILAMADI")
+            if (event.sessionId == snapshot.sessionId) {
+                when (snapshot.activity) {
+                    RobotActivityState.LISTENING -> {
+                        if (event.hasText) snapshot = snapshot.copy(activity = RobotActivityState.THINKING)
+                        else showError("KONUŞMA ANLAŞILAMADI")
+                    }
+
+                    RobotActivityState.THINKING -> {
+                        if (!event.hasText) showError("KONUŞMA ANLAŞILAMADI")
+                    }
+
+                    else -> Unit
+                }
             }
             emptyList()
         }

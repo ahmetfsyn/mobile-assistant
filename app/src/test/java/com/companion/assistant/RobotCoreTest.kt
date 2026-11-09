@@ -72,6 +72,27 @@ class RobotCoreTest {
     }
 
     @Test
+    fun platformTranscriptMovesDirectlyFromListeningToThinking() {
+        val core = readyCoreWithMicrophone()
+        val start = core.dispatch(RobotEvent.FaceTapped).single() as RobotEffect.StartListening
+        assertEquals(RobotActivityState.LISTENING, core.snapshot.activity)
+
+        core.dispatch(RobotEvent.TranscriptReady(start.sessionId, hasText = true))
+        assertEquals(RobotActivityState.THINKING, core.snapshot.activity)
+    }
+
+    @Test
+    fun emptyPlatformTranscriptShowsRecoverableError() {
+        val core = readyCoreWithMicrophone()
+        val start = core.dispatch(RobotEvent.FaceTapped).single() as RobotEffect.StartListening
+
+        core.dispatch(RobotEvent.TranscriptReady(start.sessionId, hasText = false))
+
+        assertEquals(RobotActivityState.ERROR, core.snapshot.activity)
+        assertEquals("KONUŞMA ANLAŞILAMADI", core.snapshot.errorMessage)
+    }
+
+    @Test
     fun newTapCancelsOldSessionAndRejectsItsLateEvents() {
         val core = readyCoreWithMicrophone()
         val first = core.dispatch(RobotEvent.FaceTapped).single() as RobotEffect.StartListening

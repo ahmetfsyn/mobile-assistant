@@ -12,12 +12,16 @@ internal object VoiceConfig {
     @Volatile
     var language: VoiceLanguage = VoiceLanguage.TURKISH
 
-    /** Empty endpoint selects the development mock. Never place a production API key here. */
+    /** Optional HTTPS PCM recognizer. Leave blank to use Android's installed speech service. */
     @Volatile
     var cloudSpeechEndpoint: String = ""
 
     @Volatile
     var cloudSpeechBearerToken: String = ""
+
+    /** Development-only override. Normal builds use the installed Android recognizer by default. */
+    @Volatile
+    var useMockSpeechRecognition: Boolean = false
 
     @Volatile
     var mockTurkishTranscription: String = "Merhaba, nasılsın?"

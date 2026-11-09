@@ -8,7 +8,7 @@ This is a staged design, not a wiring guide or a claim that these parts are inst
 | --- | --- | --- |
 | General Mobile GM 5 Plus | Landscape face, touch, microphone, speaker, Wi-Fi, Android app | Project `minSdk=24`; the device used in the preceding connection check reported API 25, so test both API 24 compatibility and this physical device. About 3 GB RAM; actual free memory, camera capability, and thermal behavior must be measured. The app holds the screen on while active; prolonged stand use needs charging/heat checks. |
 | Mac with Docker Desktop | Local Node AI gateway and future durable memory/hardware gateway | Must be powered and on the private LAN for Gemini/backend requests. Current Compose binds port 3000 to the selected LAN IP and reuses a portable Node 22 image. |
-| Phone microphone/speaker | Push-to-talk capture and Android TTS | Real default STT is absent; do not add a second simultaneous microphone owner. Audio output diagnostic screen exists for routing checks. |
+| Phone microphone/speaker | Push-to-talk capture and Android TTS | Android platform STT is now the default and owns the microphone during recognition; its Turkish/offline behavior still needs testing on the physical phone. Audio output diagnostic screen exists for routing checks. |
 | Phone camera | Potential future vision input | No camera permission or capture code currently exists. Desk stand angle may not show the room or user; inspect physical field of view before designing person-aware behavior. |
 
 ## Optional staged additions

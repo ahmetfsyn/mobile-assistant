@@ -1,15 +1,15 @@
 # Phased Robot Roadmap
 
-This roadmap is a sequence of **small, separately reversible deliveries**, not authorization to implement them all. Complexity is a rough one-engineer estimate after the specified dependencies are available; device-specific investigation and hardware procurement can dominate it. Every phase keeps the existing face, tap-to-talk, provider-neutral backend, local Docker route, Turkish default, and API 24 build working. Phase 1 is implemented; later phases remain planned.
+This roadmap is a sequence of **small, separately reversible deliveries**, not authorization to implement them all. Complexity is a rough one-engineer estimate after the specified dependencies are available; device-specific investigation and hardware procurement can dominate it. Every phase keeps the existing face, tap-to-talk, provider-neutral backend, local Docker route, Turkish default, and API 24 build working. Phase 1 is implemented. Phase 2's platform adapter is implemented, with physical-device acceptance still open; later phases remain planned.
 
 ## Priority and gates
 
-**Best near-term value:** Phase 1 → Phase 2 → Phase 3. The current voice reply can reach Gemini and TTS, but default STT substitutes a fixed sentence. Fixing that changes the product more than adding motors or an elaborate AI agent. Phase 4 adds character only after turn-taking is dependable. Before persistent personal data or actuators, complete authenticated local access and explicit consent design.
+**Best near-term value:** Phase 1 → Phase 2 → Phase 3. The Phase 2 Android speech adapter is implemented; device-level Turkish accuracy and offline behavior still need verification before the voice path is considered dependable. Phase 4 adds character only after turn-taking is dependable. Before persistent personal data or actuators, complete authenticated local access and explicit consent design.
 
 | Phase | Outcome | Complexity | Additional hardware | 0 TL ongoing software/API path? |
 | --- | --- | --- | --- | --- |
 | 1 | Robot Core and policy seams — complete | Medium, ~1–2 weeks | No | Yes |
-| 2 | Real Turkish STT | Medium–high, ~1–3 weeks | No | Yes if platform/Vosk path passes; service behavior must be verified |
+| 2 | Real Turkish STT — adapter implemented; device acceptance open | Medium–high, ~1–3 weeks | No | Yes if platform/Vosk path passes; service behavior must be verified |
 | 3 | Robust turn-taking and interruption | Medium, ~1–2 weeks | No | Yes |
 | 4 | Personality and bounded emotion | Medium, ~1–2 weeks | No | Yes locally; Gemini usage remains quota-dependent |
 | 5 | Consented persistent memory | High, ~2–4 weeks | No; backup storage optional | Yes locally |
@@ -28,9 +28,9 @@ This roadmap is a sequence of **small, separately reversible deliveries**, not a
 
 ## Phase 2 — Real Turkish STT (first user-facing priority)
 
-- **Objective/modules:** Replace default mock transcript in normal builds. Prototype Android platform `SpeechRecognizer` first, including Turkish availability and Wi-Fi-off behavior. In parallel only if needed, benchmark Vosk small Turkish model behind a PCM recognizer adapter. Keep mock explicitly selectable for tests.
-- **Dependencies/expected components:** Phase 1 event/session gate; `PlatformSpeechAdapter.kt` or `VoskSpeechAdapter.kt`, `SpeechResult` metadata, permission/status UX, model distribution if Vosk selected. Platform recognizer must own its mic session; it cannot simply consume the current `AudioRecording`.
-- **Acceptance/testing:** User speaks at least ten varied Turkish phrases in quiet and desk noise; captured transcript changes with speech, no fixed sample; error and no-network path truthful; cold/warm latency, peak RAM, APK size, and battery measured on the physical phone; no audio retained. Automated adapter tests plus manual real-device/airplane-mode tests.
+- **Objective/modules:** Replace default mock transcript in normal builds. **Implemented:** `PlatformSpeechInput` uses Android's installed `SpeechRecognizer` for `tr-TR`, while `SpeechInput` preserves the separately configured HTTPS PCM adapter and explicit mock mode. Offline is requested as a preference, not claimed as a guarantee.
+- **Dependencies/expected components:** Phase 1 event/session gate; `SpeechInput.kt`, mapped service/network errors, existing microphone permission UX, and session/lifecycle cancellation. Platform recognizer owns its mic session and returns text rather than consuming `AudioRecording`.
+- **Acceptance/testing:** Automated: default/endpoint/mock selection and direct LISTENING → THINKING/empty-result reducer paths are covered; `testDebugUnitTest` and `assembleDebug` pass. **Still required on the GM 5 Plus:** speak at least ten varied Turkish phrases in quiet and desk noise; verify changing transcripts, service/no-network errors, and Wi-Fi-off behavior; measure cold/warm latency, peak RAM, APK size, and battery. This task did not verify physical-device recognition or retain audio.
 - **Risk/cost:** Platform offline hint may be ignored; Turkish service may be missing. Vosk model is 35 MB and small models use substantial runtime RAM; accuracy is unreported. Medium–high; 0 TL service path if a local recognizer passes.
 
 ## Phase 3 — Voice reliability and interruption

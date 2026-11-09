@@ -120,7 +120,7 @@ adb -s "$PHONE_SERIAL" logcat -d -v brief 'VoiceInteraction:V' '*:S'
 docker compose logs --tail=50 companion-api
 ```
 
-Compare `X-Request-ID` values in Logcat and Docker logs. Logs contain status and normalized error codes, not conversation text or API keys. A configuration probe alone omits `-e conversation true`. A real voice test still needs someone to tap the face and speak near the phone. The current speech recognizer is a development mock unless a separate HTTPS recognition endpoint is configured; it supplies a fixed Turkish sample transcript after actual audio is detected.
+Compare `X-Request-ID` values in Logcat and Docker logs. Logs contain status and normalized error codes, not conversation text or API keys. A configuration probe alone omits `-e conversation true`. A real voice test still needs someone to tap the face and speak near the phone. By default, voice input uses the Android platform speech service with `tr-TR`; availability, network use, and offline Turkish support depend on the device's installed service. A separately configured HTTPS PCM recognition endpoint remains available.
 
 `gemini-3.8-flash` is a valid Google model, but repeated local requests timed out while `gemini-3.5-flash-lite` completed a synthetic request quickly. The local Compose default therefore favors the tested faster model. See Google's [model list](https://ai.google.dev/gemini-api/docs/models) and [pricing/free-tier table](https://ai.google.dev/gemini-api/docs/pricing) for current availability and quota details.
 

@@ -39,9 +39,11 @@ class MainActivity : Activity() {
         faceView = face
         val core = RobotCore(::onRobotSnapshotChanged)
         robotCore = core
+        val speechInput = SpeechInputFactory.create(applicationContext)
         voiceController = VoiceInteractionController(
             robotCore = core,
-            speechRecognizer = SpeechRecognizerFactory.create(),
+            speechInput = speechInput.input,
+            recordedSpeechRecognizer = speechInput.recordedSpeechRecognizer,
             speechOutput = TextToSpeechManager(applicationContext),
             conversationEngine = ConversationEngineFactory.create(BuildConfig.COMPANION_BACKEND_URL),
             conversationHistory = SharedPreferencesConversationHistoryStore(applicationContext)

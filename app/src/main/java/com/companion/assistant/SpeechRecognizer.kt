@@ -1,6 +1,5 @@
 package com.companion.assistant
 
-import android.util.Log
 import org.json.JSONObject
 import java.io.IOException
 import java.net.HttpURLConnection
@@ -17,7 +16,7 @@ internal interface SpeechRecognizer {
 
 internal class SpeechRecognitionFailure(message: String, cause: Throwable? = null) : IOException(message, cause)
 
-/** Deterministic development path used when no cloud endpoint is configured. */
+/** Deterministic development path selected only when explicitly enabled. */
 internal class MockSpeechRecognizer : SpeechRecognizer {
     override fun recognize(recording: AudioRecording, language: VoiceLanguage): String {
         if (recording.pcm16le.isEmpty()) throw SpeechRecognitionFailure("Ses kaydı boş.")
@@ -109,18 +108,5 @@ internal class HttpSpeechRecognizer(
         private const val CONNECT_TIMEOUT_MS = 8_000
         private const val READ_TIMEOUT_MS = 12_000
         private const val MAX_RESPONSE_CHARS = 64 * 1024
-    }
-}
-
-internal object SpeechRecognizerFactory {
-    fun create(): SpeechRecognizer {
-        val endpoint = VoiceConfig.cloudSpeechEndpoint.trim()
-        return if (endpoint.isEmpty()) {
-            Log.i("VoiceInteraction", "Ses tanıma deneme kipinde; kayıt örnek metne dönüştürülecek.")
-            MockSpeechRecognizer()
-        } else {
-            Log.i("VoiceInteraction", "HTTPS ses tanıma servisi seçildi.")
-            HttpSpeechRecognizer(endpoint, VoiceConfig.cloudSpeechBearerToken.trim())
-        }
     }
 }
