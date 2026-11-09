@@ -6,6 +6,8 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.View
 import android.view.WindowManager
 
@@ -16,6 +18,16 @@ class MainActivity : Activity() {
     private var audioDiagnosticView: AudioDiagnosticView? = null
     private var audioDiagnosticController: AudioOutputDiagnosticController? = null
     private var showingAudioDiagnostics = false
+    private var microphonePermissionRequestPending = false
+    private var robotCore: RobotCore? = null
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val dismissRobotError = Runnable {
+        val snapshot = robotCore?.snapshot ?: return@Runnable
+        if (snapshot.activity == RobotActivityState.ERROR) {
+            dispatchRobotEvent(RobotEvent.ErrorDismissed(snapshot.sessionId))
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -25,8 +37,10 @@ class MainActivity : Activity() {
 
         val face = FaceView(this)
         faceView = face
+        val core = RobotCore(::onRobotSnapshotChanged)
+        robotCore = core
         voiceController = VoiceInteractionController(
-            faceView = face,
+            robotCore = core,
             speechRecognizer = SpeechRecognizerFactory.create(),
             speechOutput = TextToSpeechManager(applicationContext),
             conversationEngine = ConversationEngineFactory.create(BuildConfig.COMPANION_BACKEND_URL),
@@ -35,11 +49,17 @@ class MainActivity : Activity() {
         face.setOnFaceTapListener { onFaceTapped() }
         face.setOnDiagnosticTapListener { openAudioDiagnostics() }
         setContentView(face)
+        dispatchRobotEvent(RobotEvent.BootCompleted)
+        dispatchRobotEvent(RobotEvent.MicrophonePermissionChanged(hasMicrophonePermission()))
     }
 
     override fun onResume() {
         super.onResume()
         applyImmersiveFullscreen()
+        dispatchRobotEvent(RobotEvent.HostResumed)
+        if (!microphonePermissionRequestPending) {
+            dispatchRobotEvent(RobotEvent.MicrophonePermissionChanged(hasMicrophonePermission()))
+        }
         if (!showingAudioDiagnostics) faceView?.start()
     }
 
@@ -49,7 +69,7 @@ class MainActivity : Activity() {
     }
 
     override fun onPause() {
-        voiceController?.onHostPaused()
+        dispatchRobotEvent(RobotEvent.HostPaused)
         closeAudioDiagnostics(showFace = true, restartFace = false)
         faceView?.stop()
         super.onPause()
@@ -70,18 +90,22 @@ class MainActivity : Activity() {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode != REQUEST_MICROPHONE) return
+        microphonePermissionRequestPending = false
 
-        if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
-            voiceController?.toggleListening()
-        } else {
-            faceView?.showVoiceError("MİKROFON İZNİ VERİLMEDİ")
-        }
+        dispatchRobotEvent(
+            RobotEvent.MicrophonePermissionChanged(
+                grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+            )
+        )
     }
 
     override fun onDestroy() {
         closeAudioDiagnostics(showFace = false, restartFace = false)
+        dispatchRobotEvent(RobotEvent.CloseRequested)
         voiceController?.close()
         voiceController = null
+        mainHandler.removeCallbacksAndMessages(null)
+        robotCore = null
         faceView?.setOnDiagnosticTapListener(null)
         faceView?.destroy()
         faceView = null
@@ -89,21 +113,67 @@ class MainActivity : Activity() {
     }
 
     private fun onFaceTapped() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
-            checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-        ) {
-            voiceController?.toggleListening()
-            return
-        }
+        dispatchRobotEvent(RobotEvent.FaceTapped)
+    }
 
-        faceView?.showVoiceError("SESLİ İLETİŞİM İÇİN MİKROFON İZNİ GEREKLİ")
-        requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_MICROPHONE)
+    private fun hasMicrophonePermission(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+            checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+
+    private fun dispatchRobotEvent(event: RobotEvent) {
+        val core = robotCore ?: return
+        core.dispatch(event).forEach { effect ->
+            when (effect) {
+                RobotEffect.RequestMicrophonePermission -> {
+                    if (!microphonePermissionRequestPending) {
+                        microphonePermissionRequestPending = true
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_MICROPHONE)
+                        } else {
+                            microphonePermissionRequestPending = false
+                            dispatchRobotEvent(RobotEvent.MicrophonePermissionChanged(granted = true))
+                        }
+                    }
+                }
+
+                is RobotEffect.StartListening -> voiceController?.startListening(effect.sessionId)
+                is RobotEffect.CancelVoiceSession -> voiceController?.cancelSession(effect.sessionId)
+            }
+        }
+    }
+
+    private fun onRobotSnapshotChanged(previous: RobotSnapshot, current: RobotSnapshot) {
+        when (current.activity) {
+            RobotActivityState.LISTENING -> {
+                mainHandler.removeCallbacks(dismissRobotError)
+                faceView?.showVoiceListening()
+            }
+
+            RobotActivityState.THINKING -> faceView?.showVoiceProcessing()
+            RobotActivityState.SPEAKING -> faceView?.showVoiceSpeaking()
+            RobotActivityState.ERROR -> {
+                faceView?.showVoiceError(current.errorMessage ?: "KONUŞMA TAMAMLANAMADI")
+                mainHandler.removeCallbacks(dismissRobotError)
+                mainHandler.postDelayed(dismissRobotError, ERROR_DISPLAY_MS)
+            }
+
+            RobotActivityState.IDLE -> {
+                mainHandler.removeCallbacks(dismissRobotError)
+                if (previous.activity in ACTIVE_FACE_STATES) faceView?.finishVoiceInteraction()
+            }
+
+            RobotActivityState.BOOTING,
+            RobotActivityState.SLEEPING,
+            RobotActivityState.OBSERVING,
+            RobotActivityState.ACTING,
+            RobotActivityState.CLOSED -> Unit
+        }
     }
 
     private fun openAudioDiagnostics() {
         if (showingAudioDiagnostics) return
 
-        voiceController?.onHostPaused()
+        dispatchRobotEvent(RobotEvent.CancelActiveInteraction)
         faceView?.stop()
         showingAudioDiagnostics = true
 
@@ -164,5 +234,12 @@ class MainActivity : Activity() {
 
     private companion object {
         const val REQUEST_MICROPHONE = 4101
+        const val ERROR_DISPLAY_MS = 1800L
+        val ACTIVE_FACE_STATES = setOf(
+            RobotActivityState.LISTENING,
+            RobotActivityState.THINKING,
+            RobotActivityState.SPEAKING,
+            RobotActivityState.ERROR
+        )
     }
 }

@@ -9,89 +9,80 @@ import java.util.concurrent.Future
 
 /** Coordinates one push-to-talk session without keeping audio or network work on the UI thread. */
 internal class VoiceInteractionController(
-    private val faceView: FaceView,
+    private val robotCore: RobotCore,
     private val speechRecognizer: SpeechRecognizer,
     private val speechOutput: SpeechOutput,
     private val conversationEngine: ConversationEngine,
     private val conversationHistory: ConversationHistoryStore,
     private val languageProvider: () -> VoiceLanguage = { VoiceConfig.language }
 ) {
-    private enum class State { IDLE, LISTENING, PROCESSING, SPEAKING, CLOSED }
-
     private val mainHandler = Handler(Looper.getMainLooper())
     private val audioRecorder = AudioRecorder()
     private val recognitionExecutor: ExecutorService = Executors.newSingleThreadExecutor { task ->
         Thread(task, "CompanionSpeechRecognition").apply { isDaemon = true }
     }
 
-    @Volatile private var state = State.IDLE
-    @Volatile private var sessionId = 0L
+    @Volatile private var closed = false
+    @Volatile private var activeSessionId: Long? = null
     private var recognitionTask: Future<*>? = null
     private var activeRecording: AudioRecording? = null
 
-    fun toggleListening() {
+    fun startListening(sessionId: Long) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
-            mainHandler.post { toggleListening() }
+            mainHandler.post { startListening(sessionId) }
             return
         }
-        if (state == State.CLOSED) return
-
-        when (state) {
-            State.LISTENING -> cancelSession(showIdle = true)
-            State.PROCESSING, State.SPEAKING -> {
-                cancelSession(showIdle = false)
-                startListening()
-            }
-            State.IDLE -> startListening()
-            State.CLOSED -> Unit
-        }
-    }
-
-    fun onHostPaused() {
-        if (state != State.CLOSED && state != State.IDLE) cancelSession(showIdle = true)
-    }
-
-    fun close() {
-        if (state == State.CLOSED) return
-        cancelSession(showIdle = false)
-        state = State.CLOSED
-        recognitionExecutor.shutdownNow()
-        speechOutput.close()
-    }
-
-    private fun startListening() {
-        if (state == State.CLOSED) return
-        val session = ++sessionId
-        state = State.LISTENING
-        faceView.showVoiceListening()
-        Log.i(TAG, "Dinleme başladı: oturum=$session")
+        if (closed || !robotCore.isCurrent(sessionId, RobotActivityState.LISTENING)) return
+        activeSessionId = sessionId
+        Log.i(TAG, "Dinleme başladı: oturum=$sessionId")
 
         val started = audioRecorder.start(object : AudioRecorder.Callback {
             override fun onRecordingComplete(recording: AudioRecording) {
                 mainHandler.post {
-                    if (!isCurrent(session, State.LISTENING)) {
+                    if (closed || !robotCore.isCurrent(sessionId, RobotActivityState.LISTENING)) {
                         recording.close()
                         return@post
                     }
-                    Log.i(TAG, "Ses kaydı tamamlandı: oturum=$session")
-                    beginRecognition(session, recording)
+                    Log.i(TAG, "Ses kaydı tamamlandı: oturum=$sessionId")
+                    robotCore.dispatch(RobotEvent.RecordingCompleted(sessionId))
+                    beginRecognition(sessionId, recording)
                 }
             }
 
             override fun onRecordingError(message: String) {
-                mainHandler.post {
-                    if (isCurrent(session, State.LISTENING)) fail(session, message)
-                }
+                mainHandler.post { reportFailure(sessionId, message) }
             }
         })
 
-        if (!started) fail(session, "MİKROFON ŞU ANDA KULLANILIYOR")
+        if (!started) reportFailure(sessionId, "MİKROFON ŞU ANDA KULLANILIYOR")
+    }
+
+    fun cancelSession(sessionId: Long) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { cancelSession(sessionId) }
+            return
+        }
+        if (activeSessionId != sessionId) return
+        audioRecorder.cancel()
+        recognitionTask?.cancel(true)
+        recognitionTask = null
+        activeRecording?.close()
+        activeRecording = null
+        conversationEngine.cancelCurrentRequest()
+        speechOutput.stop()
+        activeSessionId = null
+    }
+
+    fun close() {
+        if (closed) return
+        closed = true
+        activeSessionId?.let(::cancelSessionOnClose)
+        recognitionExecutor.shutdownNow()
+        speechOutput.close()
     }
 
     private fun beginRecognition(session: Long, recording: AudioRecording) {
-        state = State.PROCESSING
         activeRecording = recording
-        faceView.showVoiceProcessing()
         val language = languageProvider()
 
         try {
@@ -107,100 +98,122 @@ internal class VoiceInteractionController(
                         recording.close()
                     }
                     if (transcript.isEmpty()) {
-                        failure = "KONUŞMA ANLAŞILAMADI"
-                    } else if (isCurrent(session, State.PROCESSING)) {
+                        if (robotCore.isCurrent(session, RobotActivityState.THINKING)) {
+                            mainHandler.post {
+                                if (robotCore.isCurrent(session, RobotActivityState.THINKING)) {
+                                    robotCore.dispatch(RobotEvent.TranscriptReady(session, hasText = false))
+                                    activeRecording = null
+                                    recognitionTask = null
+                                    activeSessionId = null
+                                }
+                            }
+                        }
+                    } else if (robotCore.isCurrent(session, RobotActivityState.THINKING)) {
                         recognizedText = transcript
                         stage = "conversation"
                         Log.i(TAG, "Ses tanıma tamamlandı; sohbet isteği başlıyor: oturum=$session")
+                        mainHandler.post {
+                            if (robotCore.isCurrent(session, RobotActivityState.THINKING)) {
+                                robotCore.dispatch(RobotEvent.TranscriptReady(session, hasText = true))
+                            }
+                        }
                         val priorMessages = conversationHistory.recentMessages()
                         val generatedReply = conversationEngine.respond(transcript, language, priorMessages)
-                        if (isCurrent(session, State.PROCESSING) && generatedReply.text.isNotBlank()) {
+                        if (robotCore.isCurrent(session, RobotActivityState.THINKING) && generatedReply.text.isNotBlank()) {
                             reply = generatedReply
-                        } else if (isCurrent(session, State.PROCESSING)) {
+                        } else if (robotCore.isCurrent(session, RobotActivityState.THINKING)) {
                             failure = "BULUT ASİSTANI BOŞ YANIT VERDİ"
                         }
                     }
                 } catch (error: Exception) {
                     if (error is InterruptedException) Thread.currentThread().interrupt()
-                    if (isCurrent(session, State.PROCESSING)) {
+                    if (robotCore.snapshot.sessionId == session && robotCore.snapshot.activity == RobotActivityState.THINKING) {
                         Log.w(TAG, "Sesli işlem başarısız: oturum=$session, aşama=$stage, tür=${error.javaClass.simpleName}, neden=${error.cause?.javaClass?.simpleName ?: "yok"}")
                     }
-                    failure = when (error) {
+                    val message = when (error) {
                         is SpeechRecognitionFailure, is ConversationFailure -> error.message ?: "KONUŞMA TAMAMLANAMADI"
                         else -> "KONUŞMA TAMAMLANAMADI"
                     }
+                    failure = message
                 }
 
                 mainHandler.post {
-                    if (!isCurrent(session, State.PROCESSING)) return@post
+                    if (!robotCore.isCurrent(session, RobotActivityState.THINKING)) return@post
                     activeRecording = null
                     recognitionTask = null
                     val generatedReply = reply
                     if (generatedReply == null) {
-                        if (failure != null) fail(session, failure ?: "KONUŞMA TAMAMLANAMADI")
+                        if (failure != null) reportFailure(session, failure ?: "KONUŞMA TAMAMLANAMADI")
                     } else {
                         recognizedText?.let { conversationHistory.appendTurn(it, generatedReply.text) }
-                        speakResponse(session, generatedReply.text, language)
+                        robotCore.dispatch(RobotEvent.ConversationReady(session, hasReply = generatedReply.text.isNotBlank()))
+                        if (robotCore.isCurrent(session, RobotActivityState.SPEAKING)) {
+                            speakResponse(session, generatedReply.text, language)
+                        }
                     }
                 }
             }
         } catch (_: Exception) {
             recording.close()
             activeRecording = null
-            fail(session, "SES TANIMA BAŞLATILAMADI")
+            reportFailure(session, "SES TANIMA BAŞLATILAMADI")
         }
     }
 
     private fun speakResponse(session: Long, response: String, language: VoiceLanguage) {
-        if (!isCurrent(session, State.PROCESSING)) return
+        if (closed || !robotCore.isCurrent(session, RobotActivityState.SPEAKING)) return
         Log.i(TAG, "Yanıt hazır (${response.length} karakter).")
 
-        state = State.SPEAKING
-        faceView.showVoiceSpeaking()
         speechOutput.speak(response, language, object : SpeechOutput.Callback {
             override fun onStarted() = Unit
 
-            override fun onCompleted() {
-                if (!isCurrent(session, State.SPEAKING)) return
-                state = State.IDLE
-                faceView.finishVoiceInteraction()
+            override fun onCompleted() = dispatchOnMain {
+                if (activeSessionId == session) activeSessionId = null
+                robotCore.dispatch(RobotEvent.SpeechCompleted(session))
             }
 
-            override fun onError(message: String) {
-                if (isCurrent(session, State.SPEAKING)) fail(session, message)
-            }
+            override fun onError(message: String) = dispatchOnMain { reportFailure(session, message) }
         })
     }
 
-    private fun fail(session: Long, message: String) {
-        if (session != sessionId || state == State.CLOSED) return
+    private fun reportFailure(session: Long, message: String) {
+        if (closed || robotCore.snapshot.sessionId != session) return
+        if (robotCore.snapshot.activity !in VOICE_STATES) return
         audioRecorder.cancel()
         recognitionTask?.cancel(true)
         recognitionTask = null
         activeRecording?.close()
         activeRecording = null
+        activeSessionId = null
         speechOutput.stop()
-        state = State.IDLE
-        faceView.showVoiceError(message)
+        robotCore.dispatch(RobotEvent.SessionFailed(session, message))
     }
 
-    private fun cancelSession(showIdle: Boolean) {
-        if (state == State.PROCESSING) conversationEngine.cancelCurrentRequest()
-        sessionId++
+    private fun cancelSessionOnClose(sessionId: Long) {
         audioRecorder.cancel()
         recognitionTask?.cancel(true)
         recognitionTask = null
         activeRecording?.close()
         activeRecording = null
+        activeSessionId = null
+        conversationEngine.cancelCurrentRequest()
         speechOutput.stop()
-        if (state != State.CLOSED) state = State.IDLE
-        if (showIdle) faceView.finishVoiceInteraction()
     }
 
-    private fun isCurrent(session: Long, expectedState: State): Boolean =
-        session == sessionId && state == expectedState
+    private fun dispatchOnMain(block: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            block()
+        } else {
+            mainHandler.post(block)
+        }
+    }
 
     private companion object {
         const val TAG = "VoiceInteraction"
+        val VOICE_STATES = setOf(
+            RobotActivityState.LISTENING,
+            RobotActivityState.THINKING,
+            RobotActivityState.SPEAKING
+        )
     }
 }

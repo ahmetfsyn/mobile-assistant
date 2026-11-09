@@ -1,6 +1,6 @@
 # Phased Robot Roadmap
 
-This roadmap is a sequence of **small, separately reversible deliveries**, not authorization to implement them all. Complexity is a rough one-engineer estimate after the specified dependencies are available; device-specific investigation and hardware procurement can dominate it. Every phase keeps the existing face, tap-to-talk, provider-neutral backend, local Docker route, Turkish default, and API 24 build working.
+This roadmap is a sequence of **small, separately reversible deliveries**, not authorization to implement them all. Complexity is a rough one-engineer estimate after the specified dependencies are available; device-specific investigation and hardware procurement can dominate it. Every phase keeps the existing face, tap-to-talk, provider-neutral backend, local Docker route, Turkish default, and API 24 build working. Phase 1 is implemented; later phases remain planned.
 
 ## Priority and gates
 
@@ -8,7 +8,7 @@ This roadmap is a sequence of **small, separately reversible deliveries**, not a
 
 | Phase | Outcome | Complexity | Additional hardware | 0 TL ongoing software/API path? |
 | --- | --- | --- | --- | --- |
-| 1 | Robot Core and policy seams | Medium, ~1–2 weeks | No | Yes |
+| 1 | Robot Core and policy seams — complete | Medium, ~1–2 weeks | No | Yes |
 | 2 | Real Turkish STT | Medium–high, ~1–3 weeks | No | Yes if platform/Vosk path passes; service behavior must be verified |
 | 3 | Robust turn-taking and interruption | Medium, ~1–2 weeks | No | Yes |
 | 4 | Personality and bounded emotion | Medium, ~1–2 weeks | No | Yes locally; Gemini usage remains quota-dependent |
@@ -21,10 +21,10 @@ This roadmap is a sequence of **small, separately reversible deliveries**, not a
 
 ## Phase 1 — Architecture foundation
 
-- **Objective/modules:** Introduce an Android `RobotCore` reducer with exclusive activity state, session generation, typed events/effects, consent snapshot, and testable clock. Adapt `VoiceInteractionController` and `FaceView` at their existing boundaries; keep their internals. Add backend capability metadata without breaking `/v1/config` only if the client needs it.
-- **Dependencies/expected components:** Current Kotlin sources; proposed `RobotCore.kt`, `RobotEvent.kt`, `RobotPolicy.kt`, reducer tests. No new service or dependency required.
-- **Acceptance/testing:** Existing face/diagnostic/voice behavior unchanged; state transitions and stale callback rejection covered by tests; `./gradlew assembleDebug` passes for API 24; manual lifecycle, rotation lock, and touch tests on the GM 5 Plus. Baseline CPU/memory/frame timing recorded.
-- **Risk/cost:** Two state owners during migration can conflict. Migrate one event path at a time, then remove duplicate transition authority. Medium; 0 TL with existing hardware.
+- **Objective/modules:** Introduce an Android `RobotCore` reducer with exclusive activity state, session generation, typed events/effects, consent snapshot, and lifecycle state. Adapt `VoiceInteractionController` and `FaceView` at their existing boundaries; keep their rendering and audio internals. Backend capability metadata was not needed.
+- **Dependencies/expected components:** Implemented `RobotCore.kt`; `MainActivity` executes permission/listen/cancel effects and renders state changes; `VoiceInteractionController` reports progress and no longer owns a duplicate state enum; `RobotCoreTest.kt` covers reducer transitions. No runtime service or dependency was added.
+- **Acceptance/testing:** Tests cover permission gate/denial, lifecycle pause/resume, voice transitions, interruption, stale-event rejection, and opt-in capability defaults. `testDebugUnitTest`, debug APK, and Android test APK builds pass for minSdk 24. The APK installed on the GM 5 Plus (API 25), but its lock screen prevented an interactive foreground/touch smoke test in this task. No hardware capability outside the phone was added.
+- **Risk/cost:** Future modules must keep dispatch serialized on the Core owner thread and execute I/O only as effects. Face idle/sleep behavior still lives in `FaceBehavior`; Core sleep state is groundwork and is not yet wired to those eye animations. Medium; 0 TL with existing hardware.
 
 ## Phase 2 — Real Turkish STT (first user-facing priority)
 

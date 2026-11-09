@@ -1,10 +1,10 @@
 # Architectural Decisions and Open Questions
 
-Status: **proposed**. These decisions guide future feature branches; they do not assert that unbuilt modules exist. Revisit a decision when measured device behavior or user needs invalidate its premise. Related detail is in [architecture](ROBOT_ARCHITECTURE.md), [stack](ROBOT_TECH_STACK.md), [roadmap](ROBOT_ROADMAP.md), and [hardware plan](ROBOT_HARDWARE_PLAN.md).
+Status: D-01 is implemented as a limited Android state foundation. Other decisions remain architectural direction for future phases. Revisit a decision when measured device behavior or user needs invalidate its premise. Related detail is in [architecture](ROBOT_ARCHITECTURE.md), [stack](ROBOT_TECH_STACK.md), [roadmap](ROBOT_ROADMAP.md), and [hardware plan](ROBOT_HARDWARE_PLAN.md).
 
 | ID | Decision and rationale | Alternatives considered and trigger to revisit |
 | --- | --- | --- |
-| D-01 | Put the logical **Robot Core reducer on Android**. The phone owns touch, face, mic, speaker, lifecycle, and consent; it must remain responsive when Mac/cloud fail. Keep effects off the reducer thread. | Backend-only coordinator would leave device state dependent on Wi-Fi. Revisit if phone becomes display-only on a different robot computer. |
+| D-01 | Put the logical **Robot Core reducer on Android**. The phone owns touch, face, mic, speaker, lifecycle, and consent; it must remain responsive when Mac/cloud fail. The Phase 1 implementation serializes boot/idle/voice/error transitions and microphone/lifecycle state, then executes I/O as host effects. | Backend-only coordinator would leave device state dependent on Wi-Fi. Camera, action, and persisted-consent flows remain unimplemented. Revisit if phone becomes display-only on a different robot computer. |
 | D-02 | Keep the backend a **single Node modular monolith**. Existing HTTP routes/provider adapters and Dockerfile already work; internal modules have no need for network boundaries. | Microservices/Kubernetes add deployment/auth/observability cost with no demonstrated gain. Split a component only for a measured resource or security isolation need. |
 | D-03 | Preserve native Canvas face and current voice interfaces. Wrap existing components in event adapters; do not rewrite rendering, TTS, or provider adapters to add a core. | A new UI framework/game engine is unjustified for the current two-eye display. Revisit if an evaluated 3-D/graphics requirement cannot be met with Canvas. |
 | D-04 | Turkish-first, honest capabilities, stable personality profile. AI text may suggest style but cannot assert nonexistent senses/actions or change permissions/emotion wholesale. | Fully model-defined personality is inconsistent and hard to audit. Revisit stylistic parameters through user tests, not safety authority. |
@@ -21,6 +21,7 @@ Status: **proposed**. These decisions guide future feature branches; they do not
 
 ## Current gaps that must not be hidden by planning language
 
+- Robot Core is a small state/effect foundation. It does not yet own FaceBehavior's autonomous eye/sleep timers, perform actions/observations, or persist consent settings.
 - The default STT is a fixed mock response after actual audio capture. No current backend STT route exists.
 - The backend has no device authentication, durable robot database, autonomous scheduler, tool executor, or hardware gateway.
 - The Android app has no camera permission or vision pipeline. Current face idle behavior is local character animation, not environment-aware autonomy.
