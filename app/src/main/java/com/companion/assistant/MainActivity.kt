@@ -1,6 +1,7 @@
 package com.companion.assistant
 
 import android.Manifest
+import android.app.AlertDialog
 import android.app.Activity
 import android.content.pm.PackageManager
 import android.graphics.Color
@@ -8,8 +9,14 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.text.InputType
 import android.view.View
 import android.view.WindowManager
+import android.widget.CheckBox
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.TextView
+import android.widget.Toast
 
 class MainActivity : Activity() {
 
@@ -17,6 +24,9 @@ class MainActivity : Activity() {
     private var voiceController: VoiceInteractionController? = null
     private var microphonePermissionRequestPending = false
     private var robotCore: RobotCore? = null
+    private var accessTokenStore: CompanionAccessTokenStore? = null
+    private var memoryConsentStore: MemoryConsentStore? = null
+    private var securityDialog: AlertDialog? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val dismissRobotError = Runnable {
@@ -36,18 +46,28 @@ class MainActivity : Activity() {
         faceView = face
         val core = RobotCore(::onRobotSnapshotChanged)
         robotCore = core
+        val tokenStore = CompanionAccessTokenStore(applicationContext)
+        accessTokenStore = tokenStore
+        val consentStore = MemoryConsentStore(applicationContext)
+        memoryConsentStore = consentStore
+        core.dispatch(RobotEvent.PersistentMemoryConsentChanged(consentStore.isEnabled()))
         val speechInput = SpeechInputFactory.create(applicationContext)
         voiceController = VoiceInteractionController(
             robotCore = core,
             speechInput = speechInput.input,
             recordedSpeechRecognizer = speechInput.recordedSpeechRecognizer,
             speechOutput = TextToSpeechManager(applicationContext),
-            conversationEngine = ConversationEngineFactory.create(BuildConfig.COMPANION_BACKEND_URL),
+            conversationEngine = ConversationEngineFactory.create(
+                endpoint = BuildConfig.COMPANION_BACKEND_URL,
+                accessTokenProvider = tokenStore::accessToken
+            ),
             conversationHistory = SharedPreferencesConversationHistoryStore(applicationContext),
             onCaptionChanged = face::setCaption,
-            onFaceCueChanged = face::setEmotionCue
+            onFaceCueChanged = face::setEmotionCue,
+            onAuthenticationRequired = { showSecuritySettings(authenticationRequired = true) }
         )
         face.setOnFaceTapListener { onFaceTapped() }
+        face.setOnSettingsTapListener { showSecuritySettings(authenticationRequired = false) }
         setContentView(face)
         dispatchRobotEvent(RobotEvent.BootCompleted)
         dispatchRobotEvent(RobotEvent.MicrophonePermissionChanged(hasMicrophonePermission()))
@@ -91,6 +111,8 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        securityDialog?.dismiss()
+        securityDialog = null
         dispatchRobotEvent(RobotEvent.CloseRequested)
         voiceController?.close()
         voiceController = null
@@ -101,8 +123,95 @@ class MainActivity : Activity() {
         super.onDestroy()
     }
 
+    @Suppress("DEPRECATION")
+    override fun onBackPressed() {
+        showSecuritySettings(authenticationRequired = false)
+    }
+
     private fun onFaceTapped() {
         dispatchRobotEvent(RobotEvent.FaceTapped)
+    }
+
+    private fun showSecuritySettings(authenticationRequired: Boolean) {
+        if (isFinishing || securityDialog?.isShowing == true) return
+        val tokenStore = accessTokenStore ?: return
+        val consentStore = memoryConsentStore ?: return
+        val tokenIsStored = tokenStore.accessToken().isNotEmpty()
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            val padding = (20f * resources.displayMetrics.density).toInt()
+            setPadding(padding, 0, padding, 0)
+        }
+        val details = TextView(this).apply {
+            text = buildString {
+                if (authenticationRequired) {
+                    append("Sunucu erişim anahtarı istiyor. Backend'deki COMPANION_ACCESS_TOKEN ile aynı değeri girin. ")
+                } else {
+                    append("İsteğe bağlı yerel backend anahtarı ve gelecekteki bellek tercihini yönetin. ")
+                }
+                append("Bu tercih konuşma içeriğini veya Gemini anahtarını uygulamaya eklemez.")
+            }
+            setPadding(0, 0, 0, (12f * resources.displayMetrics.density).toInt())
+        }
+        val tokenInput = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            isSingleLine = true
+            hint = if (tokenIsStored) "Boş bırakın: kayıtlı anahtar korunur" else "Backend erişim anahtarı"
+            contentDescription = "Backend erişim anahtarı"
+        }
+        val memoryConsent = CheckBox(this).apply {
+            text = "Gelecekteki uzun süreli bellek için rıza"
+            isChecked = consentStore.isEnabled()
+            contentDescription = "Gelecekteki uzun süreli bellek için rıza"
+        }
+        val memoryDetails = TextView(this).apply {
+            text = "Uzun süreli bellek bu sürümde etkin değil ve yeni anılar saklanmıyor. Bu tercih gelecekteki özellik için kaydedilir. Mevcut son sekiz mesaj sohbet bağlamı için Android'de tutulur."
+            setPadding(0, (4f * resources.displayMetrics.density).toInt(), 0, 0)
+        }
+        content.addView(details)
+        content.addView(tokenInput)
+        content.addView(memoryConsent)
+        content.addView(memoryDetails)
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("GÜVENLİK VE GİZLİLİK")
+            .setView(content)
+            .setPositiveButton("KAYDET", null)
+            .setNeutralButton("ANAHTARI SİL", null)
+            .setNegativeButton("KAPAT", null)
+            .create()
+        securityDialog = dialog
+        dialog.setOnDismissListener {
+            if (securityDialog === dialog) securityDialog = null
+        }
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val enteredToken = tokenInput.text?.toString().orEmpty().trim()
+                if (enteredToken.isNotEmpty() && !tokenStore.saveAccessToken(enteredToken)) {
+                    Toast.makeText(this, "ANAHTAR EN AZ 32 KARAKTER OLMALI", Toast.LENGTH_LONG).show()
+                    return@setOnClickListener
+                }
+                consentStore.setEnabled(memoryConsent.isChecked)
+                robotCore?.dispatch(RobotEvent.PersistentMemoryConsentChanged(memoryConsent.isChecked))
+                if (robotCore?.snapshot?.activity == RobotActivityState.ERROR) {
+                    dispatchRobotEvent(RobotEvent.ErrorDismissed(robotCore?.snapshot?.sessionId ?: 0L))
+                }
+                dialog.dismiss()
+            }
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                tokenStore.clearAccessToken()
+                Toast.makeText(this, "ERİŞİM ANAHTARI SİLİNDİ", Toast.LENGTH_SHORT).show()
+                dialog.dismiss()
+            }
+            dialog.window?.decorView?.systemUiVisibility =
+                View.SYSTEM_UI_FLAG_FULLSCREEN or
+                    View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                    View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+                    View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                    View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+        }
+        dialog.show()
     }
 
     private fun hasMicrophonePermission(): Boolean =

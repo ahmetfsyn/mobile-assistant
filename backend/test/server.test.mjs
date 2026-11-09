@@ -80,6 +80,68 @@ test("health and config endpoints expose active provider/model but never credent
   });
 });
 
+test("configured companion access token gates config and conversation routes without leaking credentials", async () => {
+  const accessToken = "c".repeat(48);
+  const entries = [];
+  let providerCalls = 0;
+  const fetchImpl = async () => {
+    providerCalls += 1;
+    return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "Yetkili yanıt." }] } }] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    });
+  };
+
+  await withServer({
+    env: { AI_PROVIDER: "gemini", GEMINI_API_KEY: "server-provider-key", COMPANION_ACCESS_TOKEN: accessToken },
+    fetchImpl,
+    requestLogger: (entry) => entries.push(entry)
+  }, async (baseUrl) => {
+    const configDenied = await fetch(`${baseUrl}/v1/config`);
+    assert.equal(configDenied.status, 401);
+    assert.equal((await configDenied.json()).error.code, "companion_auth_required");
+
+    const conversationDenied = await fetch(`${baseUrl}/v1/conversations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer wrong-token" },
+      body: JSON.stringify({ message: "Yetkisiz istek" })
+    });
+    assert.equal(conversationDenied.status, 401);
+    assert.equal((await conversationDenied.json()).error.code, "companion_auth_required");
+    assert.equal(providerCalls, 0);
+
+    const configAllowed = await fetch(`${baseUrl}/v1/config`, {
+      headers: { Authorization: `Bearer ${accessToken}` }
+    });
+    assert.equal(configAllowed.status, 200);
+
+    const conversationAllowed = await fetch(`${baseUrl}/v1/conversations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
+      body: JSON.stringify({ message: "Yetkili istek" })
+    });
+    assert.equal(conversationAllowed.status, 200);
+    assert.equal((await conversationAllowed.json()).reply, "Yetkili yanıt.");
+    assert.equal(providerCalls, 1);
+  });
+
+  const serializedLogs = JSON.stringify(entries);
+  assert.equal(serializedLogs.includes(accessToken), false);
+  assert.equal(serializedLogs.includes("wrong-token"), false);
+  assert.equal(serializedLogs.includes("server-provider-key"), false);
+  assert.equal(entries.filter((entry) => entry.event === "companion_auth_rejected").length, 2);
+});
+
+test("too-short companion access token disables service configuration", async () => {
+  await withServer({
+    env: { AI_PROVIDER: "mock", COMPANION_ACCESS_TOKEN: "short" }
+  }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/healthz`);
+    assert.equal(response.status, 503);
+    assert.equal((await response.json()).error.code, "invalid_companion_access_token");
+  });
+});
+
 test("Gemini is the default provider and reports missing credentials without secrets", async () => {
   const config = readRuntimeConfig({});
   assert.equal(config.provider, "gemini");

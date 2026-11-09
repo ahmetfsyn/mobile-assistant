@@ -150,6 +150,11 @@ class RobotCoreTest {
         assertFalse(core.snapshot.consent.persistentMemoryEnabled)
         assertFalse(core.snapshot.consent.autonomousSpeechEnabled)
 
+        core.dispatch(RobotEvent.PersistentMemoryConsentChanged(enabled = true))
+        assertTrue(core.snapshot.consent.persistentMemoryEnabled)
+        core.dispatch(RobotEvent.PersistentMemoryConsentChanged(enabled = false))
+        assertFalse(core.snapshot.consent.persistentMemoryEnabled)
+
         core.dispatch(RobotEvent.CameraConsentChanged(enabled = true))
         assertFalse(core.snapshot.consent.cameraObservationEnabled)
         core.dispatch(RobotEvent.CameraPermissionChanged(granted = true))

@@ -59,12 +59,19 @@ For the Ubuntu VPS deployment, Docker Compose, Caddy HTTPS, server-side environm
 | `GEMINI_API_KEY` | When provider is `gemini` | Google AI Studio key, read only by the backend and sent in Google's `x-goog-api-key` header. |
 | `OPENAI_API_KEY` | When provider is `openai` | OpenAI secret, read only by the backend. |
 | `ANTHROPIC_API_KEY` | When provider is `anthropic` | Anthropic secret, read only by the backend. |
+| `COMPANION_ACCESS_TOKEN` | Optional | When set, protects `/v1/config` and `/v1/conversations` with a bearer token. Use 32–512 random characters; leave empty for the current backwards-compatible development mode. Never put a Gemini provider key here. |
 | `COMPANION_PERSONALITY` | No | Optional style instructions. The selected language and truthful-capability rules are always appended. |
 | `AI_TIMEOUT_MS` | No; defaults to `40000` for Gemini and `20000` for other providers | Provider timeout in milliseconds, clamped to 2–60 seconds. Android waits 45 seconds for a conversation response. |
 | `API_RATE_LIMIT_PER_MINUTE` | No; defaults to `40` | Per-process request limit per client IP. |
 | `PORT` | Set by host | HTTP listener port; defaults to `10000` locally and is set to `3000` in the Oracle Compose deployment. |
 
 To change models later, set `AI_MODEL` to an identifier available to the configured Google AI Studio project, then restart or redeploy the backend. No fallback model is selected automatically. Google's current model documentation notes access restrictions can apply to Gemini 2.5 models; if the account cannot use `gemini-2.5-flash`, choose an available model explicitly. See [Gemini models](https://ai.google.dev/gemini-api/docs/models).
+
+### Optional companion API access gate
+
+Generate a random access token with at least 32 characters (for example, `openssl rand -base64 32`) and set it as `COMPANION_ACCESS_TOKEN` in the backend's local `.env` or deployment secret store. Restart the backend after changing it. The Android app asks for the token after an authenticated request is rejected; it stores the value encrypted with Android Keystore and sends it only as an `Authorization: Bearer` header. The health endpoint remains public and does not expose the token.
+
+The current local Docker route uses private-LAN HTTP. A bearer token on HTTP is visible to a device observing that Wi-Fi traffic; keep this route on a trusted private network, do not forward the port publicly, and do not use it for sensitive persistent-memory data. Durable memory remains unavailable until a per-device pairing and authenticated encrypted transport are implemented and reviewed. Leaving the token blank preserves existing local development behavior and does not provide API authentication.
 
 ## API
 

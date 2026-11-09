@@ -20,7 +20,8 @@ internal class VoiceInteractionController(
     private val languageProvider: () -> VoiceLanguage = { VoiceConfig.language },
     private val onCaptionChanged: (String?) -> Unit = {},
     private val personalityProfile: PersonalityProfile = PersonalityProfile.DEFAULT,
-    private val onFaceCueChanged: (FaceCue) -> Unit = {}
+    private val onFaceCueChanged: (FaceCue) -> Unit = {},
+    private val onAuthenticationRequired: () -> Unit = {}
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val recognitionExecutor: ExecutorService = Executors.newSingleThreadExecutor { task ->
@@ -203,6 +204,7 @@ internal class VoiceInteractionController(
             recognitionTask = recognitionExecutor.submit {
                 var reply: ConversationReply? = null
                 var failure: String? = null
+                var authenticationRequired = false
                 try {
                     if (closed || activeInteractionId != interactionId ||
                         !robotCore.isCurrent(session, RobotActivityState.THINKING)
@@ -219,6 +221,7 @@ internal class VoiceInteractionController(
                     else failure = "BULUT ASİSTANI BOŞ YANIT VERDİ"
                 } catch (error: Exception) {
                     if (error is InterruptedException) Thread.currentThread().interrupt()
+                    authenticationRequired = (error as? ConversationFailure)?.code == "companion_auth_required"
                     if (robotCore.isCurrent(session, RobotActivityState.THINKING)) {
                         Log.w(
                             TAG,
@@ -242,6 +245,7 @@ internal class VoiceInteractionController(
                     recognitionTask = null
                     val generatedReply = reply
                     if (generatedReply == null) {
+                        if (authenticationRequired) onAuthenticationRequired()
                         reportFailure(session, failure ?: "KONUŞMA TAMAMLANAMADI")
                     } else {
                         applyEmotionEvent(EmotionEvent.RESPONSE_RECEIVED)

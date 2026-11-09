@@ -1,5 +1,5 @@
 import { createServer as createNodeServer } from "node:http";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -54,6 +54,7 @@ export function readRuntimeConfig(env = process.env) {
     openAiKey: String(env.OPENAI_API_KEY ?? "").trim(),
     anthropicKey: String(env.ANTHROPIC_API_KEY ?? "").trim(),
     geminiKey: String(env.GEMINI_API_KEY ?? "").trim(),
+    companionAccessToken: String(env.COMPANION_ACCESS_TOKEN ?? "").trim(),
     personality: String(env.COMPANION_PERSONALITY ?? "").trim(),
     timeoutMs: Number.isFinite(timeout) ? Math.max(2_000, Math.min(timeout, 60_000)) : defaultTimeoutMs,
     rateLimitPerMinute: Number.isFinite(rateLimit) ? Math.max(1, Math.min(rateLimit, 300)) : 40
@@ -76,7 +77,21 @@ function configurationError(config) {
   if (config.provider === "gemini" && !config.geminiKey) {
     return new ApiError("missing_provider_credentials", 503, "Set GEMINI_API_KEY on the backend.");
   }
+  if (config.companionAccessToken && (config.companionAccessToken.length < 32 || config.companionAccessToken.length > 512)) {
+    return new ApiError("invalid_companion_access_token", 503, "COMPANION_ACCESS_TOKEN must contain 32 to 512 characters.");
+  }
   return null;
+}
+
+function hasValidCompanionToken(request, expectedToken) {
+  if (!expectedToken) return true;
+  const authorization = request.headers.authorization;
+  if (typeof authorization !== "string") return false;
+  const match = /^Bearer\s+([^\s]+)$/i.exec(authorization);
+  if (!match) return false;
+  const provided = Buffer.from(match[1], "utf8");
+  const expected = Buffer.from(expectedToken, "utf8");
+  return provided.length === expected.length && timingSafeEqual(provided, expected);
 }
 
 function parseHistory(rawHistory) {
@@ -257,6 +272,12 @@ export function createConversationServer({
     const clientKey = request.socket.remoteAddress ?? "unknown";
     if (!allowRequest(clientKey)) {
       sendError(response, new ApiError("rate_limited", 429, "Too many requests. Try again shortly."));
+      return;
+    }
+
+    if (!hasValidCompanionToken(request, config.companionAccessToken)) {
+      requestLogger({ event: "companion_auth_rejected", interactionId, requestId, route: isConfigRequest ? "config" : "conversation" });
+      sendError(response, new ApiError("companion_auth_required", 401, "A valid companion access token is required."));
       return;
     }
 

@@ -8,12 +8,14 @@ import java.util.UUID
 class BackendProbeInstrumentation : Instrumentation() {
     private var runConversation = false
     private var conversationBatch = false
+    private var securityStoreProbe = false
     private var endpointOverride: String? = null
 
     override fun onCreate(arguments: Bundle?) {
         super.onCreate(arguments)
         runConversation = arguments?.getString("conversation") == "true"
         conversationBatch = arguments?.getString("conversationBatch") == "true"
+        securityStoreProbe = arguments?.getString("securityStore") == "true"
         endpointOverride = arguments?.getString("endpoint")?.trim()?.takeIf(String::isNotEmpty)
         start()
     }
@@ -22,6 +24,15 @@ class BackendProbeInstrumentation : Instrumentation() {
         val results = Bundle()
         var stage = "configuration"
         try {
+            if (securityStoreProbe) {
+                stage = "security_store"
+                runSecurityStoreProbe()
+                results.putString("securityStore", "ok")
+                results.putString("result", "ok")
+                finish(0, results)
+                return
+            }
+
             val endpoint = endpointOverride ?: BuildConfig.COMPANION_BACKEND_URL
             check(endpoint.isNotBlank()) { "Backend URL is empty in this APK." }
             val engine = ConversationEngineFactory.create(endpoint)
@@ -63,6 +74,28 @@ class BackendProbeInstrumentation : Instrumentation() {
             results.putString("errorMessage", error.message.orEmpty())
             results.putString("causeClass", error.cause?.javaClass?.simpleName.orEmpty())
             finish(1, results)
+        }
+    }
+
+    private fun runSecurityStoreProbe() {
+        val tokenStore = CompanionAccessTokenStore(targetContext)
+        val consentStore = MemoryConsentStore(targetContext)
+        val previousToken = tokenStore.accessToken()
+        val previousConsent = consentStore.isEnabled()
+        try {
+            check(!tokenStore.saveAccessToken("too-short")) { "A short access token was accepted." }
+            val syntheticToken = "synthetic-device-token-for-keystore-probe-2026"
+            check(tokenStore.saveAccessToken(syntheticToken)) { "Android Keystore could not encrypt the test token." }
+            check(tokenStore.accessToken() == syntheticToken) { "Android Keystore could not decrypt the test token." }
+            tokenStore.clearAccessToken()
+            check(tokenStore.accessToken().isEmpty()) { "Cleared token remained available." }
+
+            consentStore.setEnabled(!previousConsent)
+            check(consentStore.isEnabled() == !previousConsent) { "Memory consent preference did not persist." }
+        } finally {
+            if (previousToken.isEmpty()) tokenStore.clearAccessToken()
+            else check(tokenStore.saveAccessToken(previousToken)) { "Could not restore the existing access token." }
+            consentStore.setEnabled(previousConsent)
         }
     }
 }

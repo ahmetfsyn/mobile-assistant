@@ -27,7 +27,11 @@ internal data class ConversationConfiguration(
 
 internal data class ConversationReply(val text: String)
 
-internal class ConversationFailure(message: String, cause: Throwable? = null) : IOException(message, cause)
+internal class ConversationFailure(
+    message: String,
+    cause: Throwable? = null,
+    val code: String? = null
+) : IOException(message, cause)
 
 internal interface ConversationEngine {
     @Throws(IOException::class)
@@ -147,7 +151,10 @@ internal class UnconfiguredConversationEngine : ConversationEngine {
 }
 
 /** Thin Android client for the provider-neutral conversation API. */
-internal class HttpConversationEngine(endpoint: String) : ConversationEngine {
+internal class HttpConversationEngine(
+    endpoint: String,
+    private val accessTokenProvider: () -> String = { "" }
+) : ConversationEngine {
     private val baseUrl = endpoint.trim().trimEnd('/')
     private val requestGeneration = AtomicLong()
 
@@ -300,6 +307,9 @@ internal class HttpConversationEngine(endpoint: String) : ConversationEngine {
             connection.setRequestProperty("X-Interaction-ID", interactionId)
             connection.setRequestProperty("Cache-Control", "no-cache, no-store")
             connection.setRequestProperty("Pragma", "no-cache")
+            accessTokenProvider().trim().takeIf(String::isNotEmpty)?.let {
+                connection.setRequestProperty("Authorization", "Bearer $it")
+            }
             if (body != null) {
                 connection.doOutput = true
                 connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
@@ -390,6 +400,7 @@ internal class HttpConversationEngine(endpoint: String) : ConversationEngine {
         } ?: "bilinmiyor"
         Log.w(TAG, "backend_error interactionId=$interactionId requestId=$requestId status=$code code=$diagnosticCode")
         val message = when {
+            errorCode == "companion_auth_required" -> "SUNUCU ERİŞİM ANAHTARI GEREKLİ"
             errorCode == "quota_exceeded" -> "AI KOTASI TÜKENDİ; SINIRLAR SIFIRLANINCA YENİDEN DENE"
             code == 429 || errorCode == "rate_limited" -> "AI SAĞLAYICISI ŞU ANDA YOĞUN"
             errorCode == "missing_provider_credentials" -> "BULUT AI KİMLİK BİLGİLERİ YAPILANDIRILMAMIŞ"
@@ -406,7 +417,7 @@ internal class HttpConversationEngine(endpoint: String) : ConversationEngine {
             code in 400..499 -> "BULUT İSTEĞİ KABUL EDİLMEDİ"
             else -> "BULUT ASİSTANINA ŞU ANDA ULAŞILAMIYOR"
         }
-        return ConversationFailure(message)
+        return ConversationFailure(message, code = errorCode.takeIf(String::isNotEmpty))
     }
 
     private companion object {
@@ -435,9 +446,13 @@ internal class HttpConversationEngine(endpoint: String) : ConversationEngine {
 }
 
 internal object ConversationEngineFactory {
-    fun create(endpoint: String, useMock: Boolean = false): ConversationEngine {
+    fun create(
+        endpoint: String,
+        useMock: Boolean = false,
+        accessTokenProvider: () -> String = { "" }
+    ): ConversationEngine {
         return when (modeFor(endpoint, useMock)) {
-            ConversationEngineMode.HTTP -> HttpConversationEngine(endpoint)
+            ConversationEngineMode.HTTP -> HttpConversationEngine(endpoint, accessTokenProvider)
             ConversationEngineMode.MOCK -> MockConversationEngine()
             ConversationEngineMode.UNCONFIGURED -> UnconfiguredConversationEngine()
         }

@@ -41,6 +41,16 @@ COMPANION_BACKEND_URL=http://MAC_LOCAL_IP:3000 ./gradlew assembleDebug
 
 Adres boş bırakılırsa sohbet isteği açık bir yapılandırma hatasıyla sonlanır; uygulama aynı sabit test yanıtını söylemez. `MockConversationEngine` yalnızca geliştirme kodu `ConversationEngineFactory.create(..., useMock = true)` ile açıkça seçtiğinde kullanılabilir. HTTPS her yerde kabul edilir; HTTP yalnızca `10.0.0.0/8`, `172.16.0.0/12` veya `192.168.0.0/16` özel IPv4 adreslerinde kabul edilir. Sağlayıcı/model bilgisi ve anahtarları APK içinde tutulmaz.
 
+## Yerel backend erişimi ve bellek tercihi
+
+Backend'de istek doğrulamasını açmak için en az 32 karakterlik rastgele bir değer üretin (`openssl rand -base64 32`) ve `backend/.env` içindeki `COMPANION_ACCESS_TOKEN` alanına kendiniz girin; ardından mevcut Docker Compose servisini yeniden başlatın. Bu uygulama `.env` dosyasını okumaz veya düzenlemez. Değişken boşken mevcut geliştirme uyumluluğu için `/v1/config` ve `/v1/conversations` kimlik doğrulamasız kalır. Dolu olduğunda iki uç nokta geçerli `Authorization: Bearer` başlığı ister; `/healthz` herkese açık kalır ve sır döndürmez.
+
+Uygulamada yüz panelinin sağ üstündeki üç noktaya veya Android Geri düğmesine dokunup aynı token'ı girin. Değer Android Keystore ile şifrelenerek cihazda saklanır; APK'ya veya `BuildConfig` içine yazılmaz. Backend anahtarı değişirse uygulamadaki kayıtlı değeri silip yenisini girin. Token Logcat'e yazılmaz.
+
+Ayar ekranındaki uzun süreli bellek izni varsayılan olarak kapalıdır ve kullanıcı tarafından değiştirilebilir. Bu sürüm uzun süreli bellek hizmeti sunmaz ve yeni anı saklamaz; bu seçenek yalnızca tercih kaydeder. Mevcut son sekiz sohbet mesajı uygulamanın mevcut davranışı gereği cihazdaki SharedPreferences alanında kalır.
+
+Yerel Docker HTTP trafiği şifrelemez; bearer token'ı aynı Wi-Fi ağındaki trafiği izleyen biri görebilir. Yalnızca güvenilir özel ağda kullanın, port yönlendirmesi açmayın ve hassas kalıcı bellek açmayın. Kalıcı bellek başlamadan önce per-device eşleştirme ve doğrulanmış TLS/pinning gibi şifreli bir taşıma gerekir. Boş token ayarı, backend erişimini korumaz.
+
 Her ses etkileşimi UUID kimliği taşır. `VoiceInteraction` Logcat kayıtları etkileşim ve HTTP istek kimliklerini, mesaj uzunluğunu, istek gövdesindeki güncel mesaj eşleşmesini ve yalnızca harfleri/uzunlukları gösteren redakte edilmiş önizlemeyi içerir. Backend logları da API anahtarı, ham ses, tam kullanıcı mesajı veya tam yanıt yazmadan istek/etkileşim kimlikleri ve sağlayıcı aşamalarını gösterir. Android ile backend, yanıtın istek ve etkileşim kimliklerinin gönderilen değerlerle eşleştiğini doğrular.
 
 ## Konuşma tanıma seçimi

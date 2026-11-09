@@ -50,6 +50,7 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
     private val panelRect = RectF()
     private val eyeRect = RectF()
     private val highlightRect = RectF()
+    private val settingsHitRect = RectF()
 
     private var panelGradient: LinearGradient? = null
     private var eyeGradient: LinearGradient? = null
@@ -62,6 +63,8 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
     private var caption = ""
     private var displayCaption = ""
     private var onFaceTapListener: (() -> Unit)? = null
+    private var onSettingsTapListener: (() -> Unit)? = null
+    private var settingsTouch = false
     private var running = false
     private var destroyed = false
     private var frameQueued = false
@@ -79,6 +82,7 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
     init {
         isClickable = true
         setPadding(0, 0, 0, 0)
+        contentDescription = "Robot yüzü. Ayarları açmak için sağ üstteki üç noktaya dokunun."
         // Keep Android's normal hardware acceleration enabled. The drawing code uses no shadows.
     }
 
@@ -102,11 +106,16 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
         stop()
         destroyed = true
         onFaceTapListener = null
+        onSettingsTapListener = null
         handler.removeCallbacksAndMessages(null)
     }
 
     fun setOnFaceTapListener(listener: (() -> Unit)?) {
         onFaceTapListener = listener
+    }
+
+    fun setOnSettingsTapListener(listener: (() -> Unit)?) {
+        onSettingsTapListener = listener
     }
 
     fun showVoiceListening() = behavior.onVoiceListening()
@@ -171,6 +180,15 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
             (w + panelWidth) * 0.5f,
             panelCenterY + panelHeight * 0.5f
         )
+        val settingsCenterX = panelRect.right - dp(24f)
+        val settingsCenterY = panelRect.top + dp(23f)
+        val settingsTouchRadius = dp(18f)
+        settingsHitRect.set(
+            settingsCenterX - settingsTouchRadius,
+            settingsCenterY - settingsTouchRadius,
+            settingsCenterX + settingsTouchRadius,
+            settingsCenterY + settingsTouchRadius
+        )
         updateDisplayText()
         panelRadius = min(dp(34f), panelHeight * 0.16f)
         panelGradient = LinearGradient(
@@ -231,7 +249,9 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
         val dotY = panelRect.top + dp(23f)
         val dotRadius = dp(1.6f)
         canvas.drawCircle(panelRect.left + dp(24f), dotY, dotRadius, detailPaint)
-        canvas.drawCircle(panelRect.right - dp(24f), dotY, dotRadius, detailPaint)
+        canvas.drawCircle(panelRect.right - dp(24f), dotY - dp(3f), dp(1.1f), detailPaint)
+        canvas.drawCircle(panelRect.right - dp(24f), dotY, dp(1.1f), detailPaint)
+        canvas.drawCircle(panelRect.right - dp(24f), dotY + dp(3f), dp(1.1f), detailPaint)
 
         detailPaint.style = Paint.Style.STROKE
         detailPaint.strokeWidth = dp(1f)
@@ -375,22 +395,32 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 touchDownAt = SystemClock.uptimeMillis()
+                settingsTouch = settingsHitRect.contains(event.x, event.y)
+                if (settingsTouch) return true
                 behavior.onTouchDown(gazeX, gazeY)
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
-                behavior.onTouchMove(gazeX, gazeY)
+                if (!settingsTouch) behavior.onTouchMove(gazeX, gazeY)
                 return true
             }
             MotionEvent.ACTION_UP -> {
+                val openedSettings = settingsTouch && settingsHitRect.contains(event.x, event.y)
                 val elapsedMs = SystemClock.uptimeMillis() - touchDownAt
+                if (settingsTouch) {
+                    settingsTouch = false
+                    if (openedSettings && elapsedMs < 650L) onSettingsTapListener?.invoke()
+                    performClick()
+                    return true
+                }
                 behavior.onTouchUp(elapsedMs)
                 if (elapsedMs < 650L) onFaceTapListener?.invoke()
                 performClick()
                 return true
             }
             MotionEvent.ACTION_CANCEL -> {
-                behavior.onTouchCancel()
+                if (!settingsTouch) behavior.onTouchCancel()
+                settingsTouch = false
                 return true
             }
         }
