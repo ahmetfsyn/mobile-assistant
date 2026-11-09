@@ -46,7 +46,8 @@ class MainActivity : Activity() {
             recordedSpeechRecognizer = speechInput.recordedSpeechRecognizer,
             speechOutput = TextToSpeechManager(applicationContext),
             conversationEngine = ConversationEngineFactory.create(BuildConfig.COMPANION_BACKEND_URL),
-            conversationHistory = SharedPreferencesConversationHistoryStore(applicationContext)
+            conversationHistory = SharedPreferencesConversationHistoryStore(applicationContext),
+            onCaptionChanged = face::setCaption
         )
         face.setOnFaceTapListener { onFaceTapped() }
         face.setOnDiagnosticTapListener { openAudioDiagnostics() }
@@ -154,6 +155,7 @@ class MainActivity : Activity() {
             RobotActivityState.THINKING -> faceView?.showVoiceProcessing()
             RobotActivityState.SPEAKING -> faceView?.showVoiceSpeaking()
             RobotActivityState.ERROR -> {
+                faceView?.setCaption(null)
                 faceView?.showVoiceError(current.errorMessage ?: "KONUŞMA TAMAMLANAMADI")
                 mainHandler.removeCallbacks(dismissRobotError)
                 mainHandler.postDelayed(dismissRobotError, ERROR_DISPLAY_MS)

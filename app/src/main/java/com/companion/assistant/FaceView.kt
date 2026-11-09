@@ -8,6 +8,8 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
+import android.text.TextUtils
+import android.text.TextPaint
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -39,7 +41,7 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
     }
     private val pupilPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val glintPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG).apply {
+    private val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG).apply {
         textAlign = Paint.Align.CENTER
         typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
         letterSpacing = 0.13f
@@ -61,6 +63,9 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
     private var panelRadius = 0f
     private var faceCenterY = 0f
     private var status = "MERHABA"
+    private var displayStatus = status
+    private var caption = ""
+    private var displayCaption = ""
     private var onFaceTapListener: (() -> Unit)? = null
     private var onDiagnosticTapListener: (() -> Unit)? = null
     private var diagnosticTouch = false
@@ -126,8 +131,16 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
 
     fun finishVoiceInteraction() = behavior.finishVoiceInteraction()
 
+    /** Shows the latest user transcript or spoken reply without persisting it. */
+    fun setCaption(text: String?) {
+        caption = text?.trim()?.take(MAX_CAPTION_CHARS).orEmpty()
+        updateDisplayText()
+        invalidate()
+    }
+
     override fun setExpression(expression: FaceExpression, status: String, durationMs: Long) {
         this.status = status
+        updateDisplayText()
         animator.transitionTo(expression, SystemClock.uptimeMillis(), durationMs)
         requestAnimatedDraw()
     }
@@ -168,6 +181,7 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
             (w + panelWidth) * 0.5f,
             panelCenterY + panelHeight * 0.5f
         )
+        updateDisplayText()
         panelRadius = min(dp(34f), panelHeight * 0.16f)
         panelGradient = LinearGradient(
             0f,
@@ -358,12 +372,32 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
         textPaint.style = Paint.Style.FILL
         textPaint.color = STATUS_COLOR
         textPaint.textSize = dp(13f)
-        canvas.drawText(status, width * 0.5f, panelRect.bottom - dp(54f), textPaint)
+        canvas.drawText(displayStatus, width * 0.5f, panelRect.bottom - dp(54f), textPaint)
+
+        if (displayCaption.isNotEmpty()) {
+            textPaint.color = CAPTION_COLOR
+            textPaint.textSize = dp(11f)
+            textPaint.letterSpacing = 0f
+            canvas.drawText(displayCaption, width * 0.5f, panelRect.bottom - dp(27f), textPaint)
+            textPaint.letterSpacing = 0.13f
+        }
 
         textPaint.color = SUBTITLE_COLOR
         textPaint.textSize = dp(9f)
         textPaint.letterSpacing = 0.21f
         canvas.drawText("MASA ARKADAŞIN", width * 0.5f, height * 0.91f, textPaint)
+        textPaint.letterSpacing = 0.13f
+    }
+
+    private fun updateDisplayText() {
+        val availableWidth = (panelRect.width() - dp(56f)).coerceAtLeast(0f)
+        textPaint.letterSpacing = 0.13f
+        textPaint.textSize = dp(13f)
+        displayStatus = TextUtils.ellipsize(status, textPaint, availableWidth, TextUtils.TruncateAt.END).toString()
+        textPaint.letterSpacing = 0f
+        textPaint.textSize = dp(11f)
+        displayCaption = if (caption.isEmpty() || availableWidth <= 0f) "" else
+            TextUtils.ellipsize(caption, textPaint, availableWidth, TextUtils.TruncateAt.END).toString()
         textPaint.letterSpacing = 0.13f
     }
 
@@ -443,6 +477,8 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
         val PUPIL = 0xFF082A43.toInt()
         val CLOSED_EYE_LINE = 0xAA70E8FF.toInt()
         val STATUS_COLOR = 0xCCB4D8E8.toInt()
+        val CAPTION_COLOR = 0xFF85CBE1.toInt()
         val SUBTITLE_COLOR = 0x665B8198
+        const val MAX_CAPTION_CHARS = 240
     }
 }

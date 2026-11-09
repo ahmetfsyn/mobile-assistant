@@ -13,7 +13,9 @@ Uygulama şu sırayı izler:
 3. Backend aktif sağlayıcı ve modeli seçer, kısa Türkçe yanıt üretir ve Android'e döndürür.
 4. Var olan Android `TextToSpeech` yanıtı seslendirir.
 
-Tanıma ve sohbet ağ işlemleri ana iş parçacığının dışında yürür. Yeni bir dokunma devam eden konuşmayı iptal eder. Ham ses saklanmaz; son sekiz metin mesajı uygulama özelindeki SharedPreferences alanında tutulur. Uygulama verisini silmek yerel geçmişi de siler.
+Tanıma ve sohbet ağ işlemleri ana iş parçacığının dışında yürür. Yeni bir dokunma devam eden konuşmayı iptal edip yeniden dinlemeye geçer; dinleme sırasında dokunma oturumu iptal eder. Yüz, geçici olarak son tanınan cümleyi ve ardından söylenecek yanıtı tek satırlık altyazı olarak gösterir; iptal veya hatada altyazı temizlenir. Altyazı ayrıca kaydedilmez ve tam metni loglanmaz; başarılı görüşmelerin metni mevcut sekiz mesajlık yerel geçmişte tutulur.
+
+TTS, Android `AudioManager` üzerinden geçici ses odağı alır ve konuşma tamamlandığında, iptal edildiğinde veya uygulama kapanırken odağı bırakır. Başka bir uygulama geçici ya da kalıcı ses odağı kaybına neden olursa TTS durdurulur ve kullanıcıya ayrı bir ses odağı hatası gösterilir. `RobotCore` ile `VoiceInteractionController`, mikrofon tanıma ve TTS aşamalarını sıralı tutar; tanıma tamamlanmadan yanıt sesi başlamaz. Ham ses saklanmaz; son sekiz metin mesajı uygulama özelindeki SharedPreferences alanında tutulur. Uygulama verisini silmek yerel geçmişi de siler.
 
 ## Bulut backend'i
 

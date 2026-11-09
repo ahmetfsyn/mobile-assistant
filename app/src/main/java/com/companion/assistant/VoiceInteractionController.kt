@@ -16,7 +16,8 @@ internal class VoiceInteractionController(
     private val speechOutput: SpeechOutput,
     private val conversationEngine: ConversationEngine,
     private val conversationHistory: ConversationHistoryStore,
-    private val languageProvider: () -> VoiceLanguage = { VoiceConfig.language }
+    private val languageProvider: () -> VoiceLanguage = { VoiceConfig.language },
+    private val onCaptionChanged: (String?) -> Unit = {}
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val recognitionExecutor: ExecutorService = Executors.newSingleThreadExecutor { task ->
@@ -38,6 +39,7 @@ internal class VoiceInteractionController(
         activeSessionId = sessionId
         val interactionId = UUID.randomUUID().toString()
         activeInteractionId = interactionId
+        onCaptionChanged(null)
         val language = languageProvider()
         Log.i(TAG, "recognition_session_started interactionId=$interactionId session=$sessionId language=${language.tag}")
 
@@ -80,6 +82,7 @@ internal class VoiceInteractionController(
         speechOutput.stop()
         activeSessionId = null
         activeInteractionId = null
+        onCaptionChanged(null)
     }
 
     fun close() {
@@ -89,6 +92,7 @@ internal class VoiceInteractionController(
         speechInput.close()
         recognitionExecutor.shutdownNow()
         speechOutput.close()
+        onCaptionChanged(null)
     }
 
     private fun onRecordingReady(
@@ -167,10 +171,12 @@ internal class VoiceInteractionController(
         if (transcript.isEmpty()) {
             activeSessionId = null
             activeInteractionId = null
+            onCaptionChanged(null)
             Log.w(TAG, "empty_transcript_not_submitted interactionId=$interactionId session=$session")
             return
         }
         if (!robotCore.isCurrent(session, RobotActivityState.THINKING)) return
+        onCaptionChanged(transcript)
 
         Log.i(
             TAG,
@@ -223,6 +229,7 @@ internal class VoiceInteractionController(
                     if (generatedReply == null) {
                         reportFailure(session, failure ?: "KONUŞMA TAMAMLANAMADI")
                     } else {
+                        onCaptionChanged(generatedReply.text)
                         Log.i(
                             TAG,
                             "conversation_response_ready interactionId=$interactionId session=$session " +
@@ -284,6 +291,7 @@ internal class VoiceInteractionController(
         activeSessionId = null
         activeInteractionId = null
         speechOutput.stop()
+        onCaptionChanged(null)
         robotCore.dispatch(RobotEvent.SessionFailed(session, message))
     }
 
@@ -297,6 +305,7 @@ internal class VoiceInteractionController(
         activeInteractionId = null
         conversationEngine.cancelCurrentRequest()
         speechOutput.stop()
+        onCaptionChanged(null)
     }
 
     private fun dispatchOnMain(block: () -> Unit) {

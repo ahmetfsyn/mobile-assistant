@@ -2,6 +2,7 @@ package com.companion.assistant
 
 import android.content.Context
 import android.media.AudioAttributes
+import android.media.AudioManager
 import android.os.Handler
 import android.os.Looper
 import android.speech.tts.TextToSpeech
@@ -30,6 +31,7 @@ internal class TextToSpeechManager(context: Context) : SpeechOutput {
     )
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val audioManager = context.applicationContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val utteranceSequence = AtomicLong()
     private var engine: TextToSpeech? = null
     private var ready = false
@@ -38,6 +40,15 @@ internal class TextToSpeechManager(context: Context) : SpeechOutput {
     private var pending: PendingSpeech? = null
     private var currentCallback: SpeechOutput.Callback? = null
     private var currentUtteranceId: String? = null
+    private var audioFocusHeld = false
+
+    private val audioFocusListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
+        if (focusChange == AudioManager.AUDIOFOCUS_LOSS ||
+            focusChange == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT
+        ) {
+            mainHandler.post { interruptForAudioFocusLoss() }
+        }
+    }
 
     init {
         engine = TextToSpeech(context.applicationContext) { status ->
@@ -79,6 +90,7 @@ internal class TextToSpeechManager(context: Context) : SpeechOutput {
         currentCallback = null
         currentUtteranceId = null
         engine?.stop()
+        abandonAudioFocus()
     }
 
     override fun close() {
@@ -92,6 +104,7 @@ internal class TextToSpeechManager(context: Context) : SpeechOutput {
         currentCallback = null
         currentUtteranceId = null
         engine?.stop()
+        abandonAudioFocus()
         engine?.shutdown()
         engine = null
     }
@@ -128,6 +141,7 @@ internal class TextToSpeechManager(context: Context) : SpeechOutput {
                 dispatch(utteranceId) {
                     currentCallback = null
                     currentUtteranceId = null
+                    abandonAudioFocus()
                     it.onCompleted()
                 }
             }
@@ -170,6 +184,12 @@ internal class TextToSpeechManager(context: Context) : SpeechOutput {
         val utteranceId = "companion-${utteranceSequence.incrementAndGet()}"
         currentCallback = callback
         currentUtteranceId = utteranceId
+        if (!requestAudioFocus()) {
+            currentCallback = null
+            currentUtteranceId = null
+            callback.onError("SES ODAĞI ALINAMADI")
+            return
+        }
         val result = tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
         if (result == TextToSpeech.ERROR) dispatchError(utteranceId)
     }
@@ -188,7 +208,43 @@ internal class TextToSpeechManager(context: Context) : SpeechOutput {
             val callback = currentCallback
             currentCallback = null
             currentUtteranceId = null
+            abandonAudioFocus()
             callback?.onError("KONUŞMA TAMAMLANAMADI")
         }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun requestAudioFocus(): Boolean {
+        val result = try {
+            audioManager.requestAudioFocus(
+                audioFocusListener,
+                AudioManager.STREAM_MUSIC,
+                AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
+            )
+        } catch (_: RuntimeException) {
+            AudioManager.AUDIOFOCUS_REQUEST_FAILED
+        }
+        audioFocusHeld = result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        return audioFocusHeld
+    }
+
+    @Suppress("DEPRECATION")
+    private fun abandonAudioFocus() {
+        if (!audioFocusHeld) return
+        audioFocusHeld = false
+        try {
+            audioManager.abandonAudioFocus(audioFocusListener)
+        } catch (_: RuntimeException) {
+            // Focus cleanup must not block voice-session or Activity teardown.
+        }
+    }
+
+    private fun interruptForAudioFocusLoss() {
+        val callback = currentCallback ?: return
+        currentCallback = null
+        currentUtteranceId = null
+        engine?.stop()
+        abandonAudioFocus()
+        callback.onError("SES ODAĞI KESİLDİ")
     }
 }
