@@ -6,6 +6,7 @@ import android.util.Log
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
+import java.util.UUID
 
 /** Coordinates push-to-talk input, recognition and a response without blocking the UI thread. */
 internal class VoiceInteractionController(
@@ -24,6 +25,7 @@ internal class VoiceInteractionController(
 
     @Volatile private var closed = false
     @Volatile private var activeSessionId: Long? = null
+    @Volatile private var activeInteractionId: String? = null
     private var recognitionTask: Future<*>? = null
     private var activeRecording: AudioRecording? = null
 
@@ -34,21 +36,26 @@ internal class VoiceInteractionController(
         }
         if (closed || !robotCore.isCurrent(sessionId, RobotActivityState.LISTENING)) return
         activeSessionId = sessionId
+        val interactionId = UUID.randomUUID().toString()
+        activeInteractionId = interactionId
         val language = languageProvider()
-        Log.i(TAG, "Dinleme başladı: oturum=$sessionId, dil=${language.tag}")
+        Log.i(TAG, "recognition_session_started interactionId=$interactionId session=$sessionId language=${language.tag}")
 
         try {
             speechInput.startListening(sessionId, language, object : SpeechInput.Callback {
                 override fun onRecordingReady(sessionId: Long, recording: AudioRecording) {
-                    dispatchOnMain { onRecordingReady(sessionId, language, recording) }
+                    dispatchOnMain { onRecordingReady(sessionId, language, interactionId, recording) }
                 }
 
                 override fun onTranscriptReady(sessionId: Long, transcript: String) {
-                    dispatchOnMain { onTranscriptReady(sessionId, language, transcript) }
+                    dispatchOnMain { onTranscriptReady(sessionId, language, interactionId, transcript) }
                 }
 
                 override fun onError(sessionId: Long, message: String) {
-                    dispatchOnMain { reportFailure(sessionId, message) }
+                    dispatchOnMain {
+                        Log.w(TAG, "recognition_failed interactionId=$interactionId session=$sessionId")
+                        reportFailure(sessionId, message)
+                    }
                 }
             })
         } catch (error: Exception) {
@@ -63,6 +70,7 @@ internal class VoiceInteractionController(
             return
         }
         if (activeSessionId != sessionId) return
+        Log.i(TAG, "interaction_cancelled interactionId=${activeInteractionId ?: "unknown"} session=$sessionId")
         speechInput.cancel()
         recognitionTask?.cancel(true)
         recognitionTask = null
@@ -71,6 +79,7 @@ internal class VoiceInteractionController(
         conversationEngine.cancelCurrentRequest()
         speechOutput.stop()
         activeSessionId = null
+        activeInteractionId = null
     }
 
     fun close() {
@@ -82,12 +91,19 @@ internal class VoiceInteractionController(
         speechOutput.close()
     }
 
-    private fun onRecordingReady(session: Long, language: VoiceLanguage, recording: AudioRecording) {
-        if (closed || !robotCore.isCurrent(session, RobotActivityState.LISTENING)) {
+    private fun onRecordingReady(
+        session: Long,
+        language: VoiceLanguage,
+        interactionId: String,
+        recording: AudioRecording
+    ) {
+        if (closed || activeInteractionId != interactionId ||
+            !robotCore.isCurrent(session, RobotActivityState.LISTENING)
+        ) {
             recording.close()
             return
         }
-        Log.i(TAG, "Ses kaydı tamamlandı: oturum=$session")
+        Log.i(TAG, "recording_completed interactionId=$interactionId session=$session")
         robotCore.dispatch(RobotEvent.RecordingCompleted(session))
         val recognizer = recordedSpeechRecognizer
         if (recognizer == null) {
@@ -116,7 +132,7 @@ internal class VoiceInteractionController(
                     recognitionTask = null
                     val error = failure
                     if (error != null) reportFailure(session, error)
-                    else onTranscriptReady(session, language, transcript.orEmpty())
+                    else onTranscriptReady(session, language, interactionId, transcript.orEmpty())
                 }
             }
         } catch (_: Exception) {
@@ -126,28 +142,58 @@ internal class VoiceInteractionController(
         }
     }
 
-    private fun onTranscriptReady(session: Long, language: VoiceLanguage, rawTranscript: String) {
-        if (closed) return
+    private fun onTranscriptReady(
+        session: Long,
+        language: VoiceLanguage,
+        interactionId: String,
+        rawTranscript: String
+    ) {
+        if (closed || activeInteractionId != interactionId) {
+            Log.i(TAG, "stale_recognition_result_ignored interactionId=$interactionId session=$session")
+            return
+        }
         if (!robotCore.isCurrent(session, RobotActivityState.LISTENING) &&
             !robotCore.isCurrent(session, RobotActivityState.THINKING)
         ) return
 
         val transcript = rawTranscript.trim()
+        Log.i(
+            TAG,
+            "recognition_result_received interactionId=$interactionId session=$session chars=${transcript.length} " +
+                "fingerprint=${VoiceDiagnostics.fingerprint(interactionId, transcript)} " +
+                "preview=${VoiceDiagnostics.redactedPreview(transcript)}"
+        )
         robotCore.dispatch(RobotEvent.TranscriptReady(session, hasText = transcript.isNotEmpty()))
         if (transcript.isEmpty()) {
             activeSessionId = null
+            activeInteractionId = null
+            Log.w(TAG, "empty_transcript_not_submitted interactionId=$interactionId session=$session")
             return
         }
         if (!robotCore.isCurrent(session, RobotActivityState.THINKING)) return
 
-        Log.i(TAG, "Ses tanıma tamamlandı: oturum=$session, karakter=${transcript.length}")
+        Log.i(
+            TAG,
+            "conversation_input_ready interactionId=$interactionId session=$session " +
+                "chars=${transcript.length} fingerprint=${VoiceDiagnostics.fingerprint(interactionId, transcript)} " +
+                "preview=${VoiceDiagnostics.redactedPreview(transcript)}"
+        )
         try {
             recognitionTask = recognitionExecutor.submit {
                 var reply: ConversationReply? = null
                 var failure: String? = null
                 try {
+                    if (closed || activeInteractionId != interactionId ||
+                        !robotCore.isCurrent(session, RobotActivityState.THINKING)
+                    ) return@submit
                     val priorMessages = conversationHistory.recentMessages()
-                    val generatedReply = conversationEngine.respond(transcript, language, priorMessages)
+                    Log.i(
+                        TAG,
+                        "conversation_engine_call interactionId=$interactionId session=$session " +
+                            "messageFingerprint=${VoiceDiagnostics.fingerprint(interactionId, transcript)} " +
+                            "historyCount=${priorMessages.size}"
+                    )
+                    val generatedReply = conversationEngine.respond(transcript, language, priorMessages, interactionId)
                     if (generatedReply.text.isNotBlank()) reply = generatedReply
                     else failure = "BULUT ASİSTANI BOŞ YANIT VERDİ"
                 } catch (error: Exception) {
@@ -155,7 +201,8 @@ internal class VoiceInteractionController(
                     if (robotCore.isCurrent(session, RobotActivityState.THINKING)) {
                         Log.w(
                             TAG,
-                            "Sohbet isteği başarısız: oturum=$session, tür=${error.javaClass.simpleName}, neden=${error.cause?.javaClass?.simpleName ?: "yok"}"
+                            "conversation_failed interactionId=$interactionId session=$session " +
+                                "type=${error.javaClass.simpleName} cause=${error.cause?.javaClass?.simpleName ?: "none"}"
                         )
                     }
                     failure = when (error) {
@@ -165,16 +212,27 @@ internal class VoiceInteractionController(
                 }
 
                 mainHandler.post {
-                    if (closed || !robotCore.isCurrent(session, RobotActivityState.THINKING)) return@post
+                    if (closed || activeInteractionId != interactionId ||
+                        !robotCore.isCurrent(session, RobotActivityState.THINKING)
+                    ) {
+                        Log.i(TAG, "stale_conversation_response_ignored interactionId=$interactionId session=$session")
+                        return@post
+                    }
                     recognitionTask = null
                     val generatedReply = reply
                     if (generatedReply == null) {
                         reportFailure(session, failure ?: "KONUŞMA TAMAMLANAMADI")
                     } else {
+                        Log.i(
+                            TAG,
+                            "conversation_response_ready interactionId=$interactionId session=$session " +
+                                "chars=${generatedReply.text.length} " +
+                                "preview=${VoiceDiagnostics.redactedPreview(generatedReply.text)}"
+                        )
                         conversationHistory.appendTurn(transcript, generatedReply.text)
                         robotCore.dispatch(RobotEvent.ConversationReady(session, hasReply = true))
                         if (robotCore.isCurrent(session, RobotActivityState.SPEAKING)) {
-                            speakResponse(session, generatedReply.text, language)
+                            speakResponse(session, interactionId, generatedReply.text, language)
                         }
                     }
                 }
@@ -184,31 +242,47 @@ internal class VoiceInteractionController(
         }
     }
 
-    private fun speakResponse(session: Long, response: String, language: VoiceLanguage) {
-        if (closed || !robotCore.isCurrent(session, RobotActivityState.SPEAKING)) return
-        Log.i(TAG, "Yanıt hazır (${response.length} karakter).")
+    private fun speakResponse(session: Long, interactionId: String, response: String, language: VoiceLanguage) {
+        if (closed || activeInteractionId != interactionId ||
+            !robotCore.isCurrent(session, RobotActivityState.SPEAKING)
+        ) return
 
         speechOutput.speak(response, language, object : SpeechOutput.Callback {
-            override fun onStarted() = Unit
+            override fun onStarted() {
+                Log.i(
+                    TAG,
+                    "tts_playback_started interactionId=$interactionId session=$session chars=${response.length} " +
+                        "preview=${VoiceDiagnostics.redactedPreview(response)}"
+                )
+            }
 
             override fun onCompleted() = dispatchOnMain {
-                if (activeSessionId == session) activeSessionId = null
+                if (activeSessionId == session && activeInteractionId == interactionId) {
+                    activeSessionId = null
+                    activeInteractionId = null
+                }
+                Log.i(TAG, "tts_playback_completed interactionId=$interactionId session=$session")
                 robotCore.dispatch(RobotEvent.SpeechCompleted(session))
             }
 
-            override fun onError(message: String) = dispatchOnMain { reportFailure(session, message) }
+            override fun onError(message: String) = dispatchOnMain {
+                Log.w(TAG, "tts_playback_failed interactionId=$interactionId session=$session")
+                reportFailure(session, message)
+            }
         })
     }
 
     private fun reportFailure(session: Long, message: String) {
         if (closed || robotCore.snapshot.sessionId != session) return
         if (robotCore.snapshot.activity !in VOICE_STATES) return
+        Log.w(TAG, "interaction_failed interactionId=${activeInteractionId ?: "unknown"} session=$session")
         speechInput.cancel()
         recognitionTask?.cancel(true)
         recognitionTask = null
         activeRecording?.close()
         activeRecording = null
         activeSessionId = null
+        activeInteractionId = null
         speechOutput.stop()
         robotCore.dispatch(RobotEvent.SessionFailed(session, message))
     }
@@ -220,6 +294,7 @@ internal class VoiceInteractionController(
         activeRecording?.close()
         activeRecording = null
         activeSessionId = null
+        activeInteractionId = null
         conversationEngine.cancelCurrentRequest()
         speechOutput.stop()
     }

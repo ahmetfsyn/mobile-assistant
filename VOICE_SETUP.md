@@ -2,7 +2,7 @@
 
 ## Konuşma akışı
 
-Yüze kısa dokunma mevcut mikrofon iznini ister ve varsayılan olarak Android'in kurulu konuşma tanıma servisini `tr-TR` diliyle açar. Android 7.0'daki platform servisi kendi mikrofon oturumunu yönetir ve son metni uygulamaya döndürür. Uygulama çevrimdışı tanımayı tercih ettiğini bildirir; servis bu tercihi yok sayabilir ve ağ isteyebilir. Türkçe desteği, indirilmiş dil paketi ve çevrimdışı çalışma cihazdaki tanıma hizmetine bağlıdır.
+Yüze kısa dokunma mevcut mikrofon iznini ister ve varsayılan olarak Android'in kurulu konuşma tanıma servisini `tr-TR` diliyle açar. Android 7.0'daki platform servisi kendi mikrofon oturumunu yönetir ve son metni uygulamaya döndürür. `EXTRA_PREFER_OFFLINE` varsayılan olarak `false` kalır; `true` yalnızca çevrimdışı motor kullanılmasını ister ve GM 5 Plus'ta çevrimdışı SODA motoru başlatılamadığı için zorlanmaz. Servis normal modda kendi çevrimdışı/ağ kararını verebilir. Türkçe desteği, indirilmiş dil paketi ve çevrimdışı çalışma cihazdaki tanıma hizmetine bağlıdır.
 
 Yapılandırılmış bir HTTPS PCM uç noktası varsa uygulama bunun yerine 16 kHz, mono, 16 bit PCM kaydeder; yaklaşık 900 ms sessizlikte durur ve kayıt 15 saniyeyle sınırlıdır. Bu yolda ses yalnızca bellekte tutulur, ağ tanıması bitince bellek temizlenir ve dosyaya yazılmaz. Hiçbir yolda uygulama içinde sabit örnek cümle varsayılan olarak kullanılmaz. Ham ses Android'in seçili konuşma servisi tarafından işlenebilir; bu servisin ağ ve gizlilik davranışı uygulamanın kontrolünde değildir.
 
@@ -37,7 +37,9 @@ Alternatif olarak `COMPANION_BACKEND_URL` ortam değişkeni kullanılabilir:
 COMPANION_BACKEND_URL=http://MAC_LOCAL_IP:3000 ./gradlew assembleDebug
 ```
 
-Adres boş bırakılırsa `MockConversationEngine` mevcut yerel test yanıtını kullanır. HTTPS her yerde kabul edilir; HTTP yalnızca `10.0.0.0/8`, `172.16.0.0/12` veya `192.168.0.0/16` özel IPv4 adreslerinde kabul edilir. Sağlayıcı/model bilgisi ve anahtarları APK içinde tutulmaz.
+Adres boş bırakılırsa sohbet isteği açık bir yapılandırma hatasıyla sonlanır; uygulama aynı sabit test yanıtını söylemez. `MockConversationEngine` yalnızca geliştirme kodu `ConversationEngineFactory.create(..., useMock = true)` ile açıkça seçtiğinde kullanılabilir. HTTPS her yerde kabul edilir; HTTP yalnızca `10.0.0.0/8`, `172.16.0.0/12` veya `192.168.0.0/16` özel IPv4 adreslerinde kabul edilir. Sağlayıcı/model bilgisi ve anahtarları APK içinde tutulmaz.
+
+Her ses etkileşimi UUID kimliği taşır. `VoiceInteraction` Logcat kayıtları etkileşim ve HTTP istek kimliklerini, mesaj uzunluğunu, istek gövdesindeki güncel mesaj eşleşmesini ve yalnızca harfleri/uzunlukları gösteren redakte edilmiş önizlemeyi içerir. Backend logları da API anahtarı, ham ses, tam kullanıcı mesajı veya tam yanıt yazmadan istek/etkileşim kimlikleri ve sağlayıcı aşamalarını gösterir. Android ile backend, yanıtın istek ve etkileşim kimliklerinin gönderilen değerlerle eşleştiğini doğrular.
 
 ## Konuşma tanıma seçimi
 

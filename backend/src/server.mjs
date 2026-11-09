@@ -1,18 +1,34 @@
 import { createServer as createNodeServer } from "node:http";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createProvider, ProviderError } from "./providers.mjs";
 
 const localEnvPath = resolve(dirname(fileURLToPath(import.meta.url)), "../.env");
-if (existsSync(localEnvPath)) process.loadEnvFile(localEnvPath);
 
 const MAX_BODY_BYTES = 24 * 1024;
 const MAX_HISTORY_MESSAGES = 8;
 const MAX_MESSAGE_CHARS = 1_800;
 const MAX_REPLY_CHARS = 900;
 const RATE_WINDOW_MS = 60_000;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function conversationFingerprint(interactionId, message) {
+  return createHash("sha256").update(`${interactionId}\0${message}`).digest("hex").slice(0, 16);
+}
+
+function redactedPreview(value, maxWords = 5) {
+  const words = String(value).trim().split(/\s+/u).filter(Boolean);
+  if (words.length === 0) return "[empty]";
+  const preview = words.slice(0, maxWords).map((word) => {
+    const [first] = Array.from(word);
+    if (!first || !/\p{L}/u.test(first)) return `[redacted:${Array.from(word).length}]`;
+    const length = Array.from(word).length;
+    return `${first}${"•".repeat(Math.min(length - 1, 5))}${length > 6 ? "…" : ""}`;
+  }).join(" ");
+  return words.length > maxWords ? `${preview} …` : preview;
+}
 
 class ApiError extends Error {
   constructor(code, status, message) {
@@ -196,18 +212,25 @@ export function createConversationServer({
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(suppliedId)
       ? suppliedId.toLowerCase()
       : randomUUID();
+    const suppliedInteractionId = request.headers["x-interaction-id"];
+    const interactionId = typeof suppliedInteractionId === "string" && UUID_PATTERN.test(suppliedInteractionId)
+      ? suppliedInteractionId.toLowerCase()
+      : randomUUID();
     response.setHeader("X-Request-ID", requestId);
+    response.setHeader("X-Interaction-ID", interactionId);
     const route = request.url === "/v1/conversations" ? "conversation"
       : request.url === "/v1/config" ? "config"
         : request.url === "/healthz" ? "health" : "other";
     if (route !== "health") {
       const startedAt = Date.now();
+      requestLogger({ event: "request_received", interactionId, requestId, route, method: request.method });
       let reported = false;
       const report = (outcome) => {
         if (reported) return;
         reported = true;
         requestLogger({
           event: "http_request",
+          interactionId,
           requestId,
           route,
           method: request.method,
@@ -275,6 +298,28 @@ export function createConversationServer({
 
     try {
       const body = validateConversationBody(await readJsonBody(request));
+      const suppliedFingerprint = request.headers["x-message-fingerprint"];
+      const fingerprintHeaderProvided = suppliedFingerprint !== undefined;
+      const expectedFingerprint = conversationFingerprint(interactionId, body.message);
+      const clientFingerprintProvided = typeof suppliedFingerprint === "string" && /^[0-9a-f]{16}$/i.test(suppliedFingerprint);
+      const clientFingerprintMatches = clientFingerprintProvided &&
+        suppliedFingerprint.toLowerCase() === expectedFingerprint;
+      requestLogger({
+        event: "conversation_message_received",
+        interactionId,
+        requestId,
+        messageChars: body.message.length,
+        messageFingerprint: expectedFingerprint,
+        clientFingerprintProvided,
+        clientFingerprintMatches,
+        messagePreview: redactedPreview(body.message)
+      });
+      if (fingerprintHeaderProvided && !clientFingerprintProvided) {
+        throw new ApiError("invalid_message_fingerprint", 400, "The conversation message fingerprint is invalid.");
+      }
+      if (clientFingerprintProvided && !clientFingerprintMatches) {
+        throw new ApiError("message_fingerprint_mismatch", 400, "The conversation message did not match its request fingerprint.");
+      }
       const configIssue = configurationError(config);
       if (configIssue) throw configIssue;
       const messages = [
@@ -287,20 +332,55 @@ export function createConversationServer({
         : config.provider === "anthropic"
           ? config.anthropicKey
           : config.geminiKey;
-      const rawReply = await provider.generate({
+      const providerEvent = config.provider === "gemini" ? "gemini" : "provider";
+      requestLogger({
+        event: `${providerEvent}_request_started`,
+        interactionId,
+        requestId,
+        provider: config.provider,
         model: config.model,
-        apiKey,
-        language: body.language,
-        messages,
-        timeoutMs: config.timeoutMs,
-        signal: abortController.signal
+        messageChars: body.message.length,
+        messageFingerprint: expectedFingerprint
       });
+      let rawReply;
+      try {
+        rawReply = await provider.generate({
+          model: config.model,
+          apiKey,
+          language: body.language,
+          messages,
+          timeoutMs: config.timeoutMs,
+          signal: abortController.signal
+        });
+      } catch (error) {
+        const errorCode = error?.code && /^[a-z0-9_]{1,64}$/i.test(error.code) ? error.code : "unknown";
+        requestLogger({
+          event: `${providerEvent}_request_failed`,
+          interactionId,
+          requestId,
+          provider: config.provider,
+          model: config.model,
+          errorCode
+        });
+        throw error;
+      }
       const reply = trimReply(rawReply);
       if (!reply) throw new ProviderError("empty_provider_response", 502, "The AI provider returned no text.");
+      requestLogger({
+        event: `${providerEvent}_response_received`,
+        interactionId,
+        requestId,
+        provider: config.provider,
+        model: config.model,
+        replyChars: reply.length,
+        replyFingerprint: conversationFingerprint(interactionId, reply),
+        replyPreview: redactedPreview(reply)
+      });
       sendJson(response, 200, {
         reply,
         provider: config.provider,
-        model: config.model
+        model: config.model,
+        interactionId
       });
     } catch (error) {
       if (!abortController.signal.aborted) sendError(response, error);
@@ -312,6 +392,7 @@ export function createConversationServer({
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  if (existsSync(localEnvPath)) process.loadEnvFile(localEnvPath);
   const port = Number.parseInt(process.env.PORT ?? "10000", 10);
   const host = process.env.HOST ?? "0.0.0.0";
   const server = createConversationServer();

@@ -37,7 +37,8 @@ internal interface ConversationEngine {
     fun respond(
         message: String,
         language: VoiceLanguage,
-        history: List<ConversationMessage>
+        history: List<ConversationMessage>,
+        interactionId: String
     ): ConversationReply
 
     /** Interrupts an in-flight network request when the user starts a new turn or leaves. */
@@ -98,7 +99,7 @@ internal class SharedPreferencesConversationHistoryStore(context: Context) : Con
     }
 }
 
-/** Development fallback used only when no backend URL is configured. */
+/** Static development response, available only through the factory's explicit useMock opt-in. */
 internal class MockConversationEngine : ConversationEngine {
     override fun fetchConfiguration() = ConversationConfiguration(
         provider = "mock",
@@ -109,15 +110,39 @@ internal class MockConversationEngine : ConversationEngine {
     override fun respond(
         message: String,
         language: VoiceLanguage,
-        history: List<ConversationMessage>
-    ) = ConversationReply(
-        text = VoiceConfig.testResponse(language)
-    )
+        history: List<ConversationMessage>,
+        interactionId: String
+    ): ConversationReply {
+        if (message.isBlank()) throw ConversationFailure("KONUŞMA METNİ BOŞ")
+        return ConversationReply(VoiceConfig.testResponse(language))
+    }
 
     override fun cancelCurrentRequest() = Unit
 
     private companion object {
         const val MAX_HISTORY_MESSAGES = 8
+    }
+}
+
+/** Explicit error path used when no backend URL is configured; it never invents a reply. */
+internal class UnconfiguredConversationEngine : ConversationEngine {
+    override fun fetchConfiguration(): ConversationConfiguration =
+        throw ConversationFailure("BULUT AI ADRESİ YAPILANDIRILMAMIŞ")
+
+    override fun respond(
+        message: String,
+        language: VoiceLanguage,
+        history: List<ConversationMessage>,
+        interactionId: String
+    ): ConversationReply {
+        Log.e(TAG, "conversation_request_not_sent interactionId=$interactionId reason=backend_url_missing")
+        throw ConversationFailure("BULUT AI ADRESİ YAPILANDIRILMAMIŞ")
+    }
+
+    override fun cancelCurrentRequest() = Unit
+
+    private companion object {
+        const val TAG = "VoiceInteraction"
     }
 }
 
@@ -128,10 +153,13 @@ internal class HttpConversationEngine(endpoint: String) : ConversationEngine {
 
     @Volatile private var activeConnection: HttpURLConnection? = null
 
-    override fun fetchConfiguration(): ConversationConfiguration = fetchConfiguration(requestGeneration.get())
+    override fun fetchConfiguration(): ConversationConfiguration = fetchConfiguration(
+        requestGeneration.get(),
+        UUID.randomUUID().toString()
+    )
 
-    private fun fetchConfiguration(token: Long): ConversationConfiguration = readConfiguration(
-        request("/v1/config", "GET", null, CONFIG_READ_TIMEOUT_MS, token)
+    private fun fetchConfiguration(token: Long, interactionId: String): ConversationConfiguration = readConfiguration(
+        request("/v1/config", "GET", null, CONFIG_READ_TIMEOUT_MS, token, interactionId)
     )
 
     private fun readConfiguration(response: JSONObject): ConversationConfiguration {
@@ -151,10 +179,20 @@ internal class HttpConversationEngine(endpoint: String) : ConversationEngine {
     override fun respond(
         message: String,
         language: VoiceLanguage,
-        history: List<ConversationMessage>
+        history: List<ConversationMessage>,
+        interactionId: String
     ): ConversationReply {
+        val currentMessage = message.trim()
+        if (currentMessage.isEmpty()) throw ConversationFailure("KONUŞMA METNİ BOŞ")
+        if (!UUID_PATTERN.matches(interactionId)) throw ConversationFailure("ETKİLEŞİM KİMLİĞİ GEÇERSİZ")
         val token = requestGeneration.get()
-        val configuration = fetchConfiguration(token)
+        val messageFingerprint = VoiceDiagnostics.fingerprint(interactionId, currentMessage)
+        Log.i(
+            TAG,
+            "conversation_input interactionId=$interactionId chars=${currentMessage.length} " +
+                "fingerprint=$messageFingerprint preview=${VoiceDiagnostics.redactedPreview(currentMessage)}"
+        )
+        val configuration = fetchConfiguration(token, interactionId)
         val messages = JSONArray()
         history.takeLast(configuration.maxHistoryMessages).forEach { entry ->
             if ((entry.role == "user" || entry.role == "assistant") && entry.content.isNotBlank()) {
@@ -162,12 +200,42 @@ internal class HttpConversationEngine(endpoint: String) : ConversationEngine {
             }
         }
         val body = JSONObject()
-            .put("message", message)
+            .put("message", currentMessage)
             .put("language", language.tag)
             .put("history", messages)
-        val response = request("/v1/conversations", "POST", body, CHAT_READ_TIMEOUT_MS, token)
+        val bodyContainsExpectedMessage = body.optString("message") == currentMessage
+        Log.i(
+            TAG,
+            "conversation_body interactionId=$interactionId containsExpectedMessage=$bodyContainsExpectedMessage " +
+                "historyCount=${messages.length()} fingerprint=$messageFingerprint"
+        )
+        if (!bodyContainsExpectedMessage) throw ConversationFailure("GÜNCEL KONUŞMA METNİ İSTEĞE EKLENEMEDİ")
+        val response = request(
+            "/v1/conversations",
+            "POST",
+            body,
+            CHAT_READ_TIMEOUT_MS,
+            token,
+            interactionId,
+            currentMessage
+        )
+        val returnedInteractionId = response.optString("interactionId")
+        if (returnedInteractionId != interactionId) {
+            Log.e(
+                TAG,
+                "conversation_body_interaction_mismatch interactionId=$interactionId " +
+                    "returnedInteractionIdPresent=${returnedInteractionId.isNotEmpty()}"
+            )
+            throw ConversationFailure("BULUT YANITININ ETKİLEŞİM KİMLİĞİ EŞLEŞMEDİ")
+        }
         val text = response.optString("reply").trim()
         if (text.isEmpty()) throw ConversationFailure("BULUT ASİSTANI BOŞ YANIT VERDİ")
+        Log.i(
+            TAG,
+            "conversation_reply interactionId=$interactionId chars=${text.length} " +
+                "fingerprint=${VoiceDiagnostics.fingerprint(interactionId, text)} " +
+                "preview=${VoiceDiagnostics.redactedPreview(text)}"
+        )
         return ConversationReply(text)
     }
 
@@ -181,7 +249,9 @@ internal class HttpConversationEngine(endpoint: String) : ConversationEngine {
         method: String,
         body: JSONObject?,
         readTimeoutMs: Int,
-        token: Long
+        token: Long,
+        interactionId: String,
+        expectedMessage: String? = null
     ): JSONObject {
         if (requestGeneration.get() != token) throw ConversationFailure("KONUŞMA İPTAL EDİLDİ")
         val url = try {
@@ -204,7 +274,7 @@ internal class HttpConversationEngine(endpoint: String) : ConversationEngine {
         }
         val requestId = UUID.randomUUID().toString()
         val route = if (path == "/v1/config") "config" else "conversation"
-        Log.i(TAG, "HTTP başladı: id=$requestId, yol=$route")
+        Log.i(TAG, "http_request_started interactionId=$interactionId requestId=$requestId route=$route host=${url.host}")
 
         val connection = try {
             url.openConnection() as? HttpURLConnection
@@ -212,7 +282,10 @@ internal class HttpConversationEngine(endpoint: String) : ConversationEngine {
         } catch (error: ConversationFailure) {
             throw error
         } catch (error: Exception) {
-            Log.w(TAG, "HTTP bağlantı açılamadı: id=$requestId, tür=${error.javaClass.simpleName}")
+            Log.w(
+                TAG,
+                "http_connection_failed interactionId=$interactionId requestId=$requestId type=${error.javaClass.simpleName}"
+            )
             throw ConversationFailure("BULUT SUNUCUSUNA BAĞLANILAMADI", error)
         }
         activeConnection = connection
@@ -220,19 +293,39 @@ internal class HttpConversationEngine(endpoint: String) : ConversationEngine {
             if (requestGeneration.get() != token) throw ConversationFailure("KONUŞMA İPTAL EDİLDİ")
             connection.connectTimeout = CONNECT_TIMEOUT_MS
             connection.readTimeout = readTimeoutMs
+            connection.useCaches = false
             connection.requestMethod = method
             connection.setRequestProperty("Accept", "application/json")
             connection.setRequestProperty("X-Request-ID", requestId)
+            connection.setRequestProperty("X-Interaction-ID", interactionId)
+            connection.setRequestProperty("Cache-Control", "no-cache, no-store")
+            connection.setRequestProperty("Pragma", "no-cache")
             if (body != null) {
                 connection.doOutput = true
                 connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                expectedMessage?.let {
+                    connection.setRequestProperty(
+                        "X-Message-Fingerprint",
+                        VoiceDiagnostics.fingerprint(interactionId, it)
+                    )
+                }
                 connection.outputStream.use { output ->
                     output.write(body.toString().toByteArray(Charsets.UTF_8))
                 }
             }
 
             val code = connection.responseCode
-            Log.i(TAG, "HTTP yanıtı: id=$requestId, yol=$route, durum=$code")
+            val returnedRequestId = connection.getHeaderField("X-Request-ID")
+            val returnedInteractionId = connection.getHeaderField("X-Interaction-ID")
+            Log.i(
+                TAG,
+                "http_response_received interactionId=$interactionId requestId=$requestId route=$route " +
+                    "status=$code requestIdMatches=${returnedRequestId == requestId} " +
+                    "interactionIdMatches=${returnedInteractionId == interactionId}"
+            )
+            if (returnedRequestId != requestId || returnedInteractionId != interactionId) {
+                throw ConversationFailure("BULUT YANITININ İSTEK KİMLİĞİ EŞLEŞMEDİ")
+            }
             val stream = if (code in 200..299) connection.inputStream else connection.errorStream
             val responseText = stream?.bufferedReader(Charsets.UTF_8)?.use { reader ->
                 val result = StringBuilder()
@@ -247,30 +340,34 @@ internal class HttpConversationEngine(endpoint: String) : ConversationEngine {
                 }
                 result.toString()
             }.orEmpty()
-            if (code !in 200..299) throw serverFailure(code, responseText, requestId)
+            if (code !in 200..299) throw serverFailure(code, responseText, requestId, interactionId)
             return JSONObject(responseText)
         } catch (error: SocketTimeoutException) {
-            Log.w(TAG, "HTTP zaman aşımı: id=$requestId, yol=$route")
+            Log.w(TAG, "http_timeout interactionId=$interactionId requestId=$requestId route=$route")
             throw ConversationFailure("SUNUCU YANITI ZAMAN AŞIMINA UĞRADI", error)
         } catch (error: UnknownHostException) {
-            Log.w(TAG, "HTTP adresi bulunamadı: id=$requestId, yol=$route")
+            Log.w(TAG, "http_host_not_found interactionId=$interactionId requestId=$requestId route=$route")
             throw ConversationFailure("SUNUCU ADRESİ BULUNAMADI", error)
         } catch (error: ConnectException) {
-            Log.w(TAG, "HTTP bağlantısı reddedildi: id=$requestId, yol=$route")
+            Log.w(TAG, "http_connection_refused interactionId=$interactionId requestId=$requestId route=$route")
             throw ConversationFailure("SUNUCU BAĞLANTIYI KABUL ETMEDİ", error)
         } catch (error: NoRouteToHostException) {
-            Log.w(TAG, "HTTP ağ yolu bulunamadı: id=$requestId, yol=$route")
+            Log.w(TAG, "http_no_route interactionId=$interactionId requestId=$requestId route=$route")
             throw ConversationFailure("YEREL AĞDA SUNUCUYA ULAŞILAMADI", error)
         } catch (error: UnknownServiceException) {
-            Log.w(TAG, "HTTP bağlantısına izin verilmedi: id=$requestId, yol=$route")
+            Log.w(TAG, "http_service_not_allowed interactionId=$interactionId requestId=$requestId route=$route")
             throw ConversationFailure("HTTP BAĞLANTISINA İZİN VERİLMİYOR", error)
         } catch (error: JSONException) {
-            Log.w(TAG, "HTTP JSON yanıtı geçersiz: id=$requestId, yol=$route")
+            Log.w(TAG, "http_invalid_json interactionId=$interactionId requestId=$requestId route=$route")
             throw ConversationFailure("BULUT SUNUCUSU YANITI OKUNAMADI", error)
         } catch (error: ConversationFailure) {
             throw error
         } catch (error: IOException) {
-            Log.w(TAG, "HTTP aktarımı başarısız: id=$requestId, yol=$route, tür=${error.javaClass.simpleName}")
+            Log.w(
+                TAG,
+                "http_transfer_failed interactionId=$interactionId requestId=$requestId route=$route " +
+                    "type=${error.javaClass.simpleName}"
+            )
             throw ConversationFailure("BULUT ASİSTANINA ULAŞILAMADI", error)
         } finally {
             if (activeConnection === connection) activeConnection = null
@@ -278,7 +375,7 @@ internal class HttpConversationEngine(endpoint: String) : ConversationEngine {
         }
     }
 
-    private fun serverFailure(code: Int, body: String, requestId: String): ConversationFailure {
+    private fun serverFailure(code: Int, body: String, requestId: String, interactionId: String): ConversationFailure {
         val errorCode = try {
             JSONObject(body).optJSONObject("error")?.optString("code").orEmpty()
         } catch (_: JSONException) {
@@ -287,7 +384,7 @@ internal class HttpConversationEngine(endpoint: String) : ConversationEngine {
         val diagnosticCode = errorCode.takeIf { value ->
             value.length in 1..64 && value.all { it in 'a'..'z' || it in '0'..'9' || it == '_' }
         } ?: "bilinmiyor"
-        Log.w(TAG, "Backend hatası: id=$requestId, durum=$code, kod=$diagnosticCode")
+        Log.w(TAG, "backend_error interactionId=$interactionId requestId=$requestId status=$code code=$diagnosticCode")
         val message = when {
             errorCode == "quota_exceeded" -> "AI KOTASI TÜKENDİ; SINIRLAR SIFIRLANINCA YENİDEN DENE"
             code == 429 || errorCode == "rate_limited" -> "AI SAĞLAYICISI ŞU ANDA YOĞUN"
@@ -315,6 +412,7 @@ internal class HttpConversationEngine(endpoint: String) : ConversationEngine {
         const val CHAT_READ_TIMEOUT_MS = 45_000
         const val MAX_RESPONSE_CHARS = 64 * 1024
         const val MAX_HISTORY_MESSAGES = 8
+        val UUID_PATTERN = Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
         /** Local HTTP is allowed only for RFC 1918 IPv4 hosts used on a trusted LAN. */
         fun isPrivateLanIpv4(host: String): Boolean {
@@ -333,11 +431,19 @@ internal class HttpConversationEngine(endpoint: String) : ConversationEngine {
 }
 
 internal object ConversationEngineFactory {
-    fun create(endpoint: String): ConversationEngine {
-        if (endpoint.isBlank()) {
-            Log.i("VoiceInteraction", "Bulut AI adresi ayarlı değil; yerel deneme yanıtı kullanılacak.")
-            return MockConversationEngine()
+    fun create(endpoint: String, useMock: Boolean = false): ConversationEngine {
+        return when (modeFor(endpoint, useMock)) {
+            ConversationEngineMode.HTTP -> HttpConversationEngine(endpoint)
+            ConversationEngineMode.MOCK -> MockConversationEngine()
+            ConversationEngineMode.UNCONFIGURED -> UnconfiguredConversationEngine()
         }
-        return HttpConversationEngine(endpoint)
+    }
+
+    fun modeFor(endpoint: String, useMock: Boolean = false): ConversationEngineMode = when {
+        useMock -> ConversationEngineMode.MOCK
+        endpoint.isBlank() -> ConversationEngineMode.UNCONFIGURED
+        else -> ConversationEngineMode.HTTP
     }
 }
+
+internal enum class ConversationEngineMode { HTTP, MOCK, UNCONFIGURED }

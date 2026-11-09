@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createConversationServer, readRuntimeConfig } from "../src/server.mjs";
+import { conversationFingerprint, createConversationServer, readRuntimeConfig } from "../src/server.mjs";
 
 async function withServer(options, run) {
   const server = createConversationServer({ requestLogger: () => {}, ...options });
@@ -18,30 +18,44 @@ async function withServer(options, run) {
 
 test("request IDs and diagnostic logs expose status without secrets or message text", async () => {
   const entries = [];
-  const requestId = "a1b2c3d4-0000-4000-8000-123456789abc";
+  const requestIds = [
+    "a1b2c3d4-0000-4000-8000-123456789abc",
+    "a1b2c3d4-0000-4000-8000-123456789abd"
+  ];
+  const interactionId = "b1b2c3d4-0000-4000-8000-123456789abc";
   await withServer({
     env: { AI_PROVIDER: "mock", GEMINI_API_KEY: "server-only-secret" },
     requestLogger: (entry) => entries.push(entry)
   }, async (baseUrl) => {
-    const config = await fetch(`${baseUrl}/v1/config`, { headers: { "X-Request-ID": requestId } });
-    assert.equal(config.headers.get("X-Request-ID"), requestId);
+    const config = await fetch(`${baseUrl}/v1/config`, {
+      headers: { "X-Request-ID": requestIds[0], "X-Interaction-ID": interactionId }
+    });
+    assert.equal(config.headers.get("X-Request-ID"), requestIds[0]);
+    assert.equal(config.headers.get("X-Interaction-ID"), interactionId);
     assert.equal(config.status, 200);
 
     const invalid = await fetch(`${baseUrl}/v1/conversations`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-Request-ID": requestId },
+      headers: {
+        "Content-Type": "application/json",
+        "X-Request-ID": requestIds[1],
+        "X-Interaction-ID": interactionId
+      },
       body: JSON.stringify({ message: "private synthetic message", language: "unsupported" })
     });
     assert.equal(invalid.status, 400);
     assert.equal(invalid.headers.get("X-Error-Code"), "unsupported_language");
   });
 
-  assert.equal(entries.length, 2);
-  assert.deepEqual(entries.map((entry) => [entry.route, entry.status, entry.errorCode]), [
+  const completed = entries.filter((entry) => entry.event === "http_request");
+  assert.equal(completed.length, 2);
+  assert.deepEqual(completed.map((entry) => [entry.route, entry.status, entry.errorCode]), [
     ["config", 200, null],
     ["conversation", 400, "unsupported_language"]
   ]);
-  assert.ok(entries.every((entry) => entry.requestId === requestId && entry.durationMs >= 0));
+  assert.deepEqual(completed.map((entry) => entry.requestId), requestIds);
+  assert.ok(completed.every((entry) => entry.interactionId === interactionId && entry.durationMs >= 0));
+  assert.equal(entries.filter((entry) => entry.event === "request_received").length, 2);
   assert.equal(JSON.stringify(entries).includes("server-only-secret"), false);
   assert.equal(JSON.stringify(entries).includes("private synthetic message"), false);
 });
@@ -156,12 +170,114 @@ test("Gemini selection uses the configured model and server-only credential", as
     const result = await response.json();
 
     assert.equal(response.status, 200);
-    assert.deepEqual(result, { reply: "Merhaba!", provider: "gemini", model: "gemini-2.5-flash" });
+    assert.equal(result.reply, "Merhaba!");
+    assert.equal(result.provider, "gemini");
+    assert.equal(result.model, "gemini-2.5-flash");
+    assert.match(result.interactionId, /^[0-9a-f-]{36}$/);
     assert.equal(providerRequest.url, "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent");
     assert.equal(providerRequest.options.headers["x-goog-api-key"], "server-only-gemini-key");
     assert.match(providerRequest.body.systemInstruction.parts[0].text, /Türkçe yanıt ver/);
     assert.deepEqual(providerRequest.body.contents.map(({ role }) => role), ["model", "user"]);
     assert.equal(JSON.stringify(result).includes("server-only-gemini-key"), false);
+  });
+});
+
+test("three distinct conversation turns become three correlated Gemini requests and matching replies", async () => {
+  const inputs = [
+    "Türkiye'nin başkenti neresidir?",
+    "Bana bir uzay hikayesi anlat.",
+    "En sevdiğin yemek nedir?"
+  ];
+  const expectedReplies = [
+    "Türkiye'nin başkenti Ankara'dır.",
+    "Küçük bir uzay gemisi Satürn'ün halkalarında kayıp bir yıldız buldu.",
+    "Yemek yiyemem ama menemen kulağa güzel geliyor."
+  ];
+  const responseByMessage = new Map(inputs.map((input, index) => [input, expectedReplies[index]]));
+  const providerCalls = [];
+  const logEntries = [];
+  const fetchGemini = async (url, options) => {
+    const body = JSON.parse(options.body);
+    const message = body.contents.at(-1).parts[0].text;
+    providerCalls.push({ url, message, apiKey: options.headers["x-goog-api-key"] });
+    const reply = responseByMessage.get(message);
+    assert.ok(reply, `unexpected Gemini input: ${message}`);
+    return new Response(JSON.stringify({
+      candidates: [{ content: { parts: [{ text: reply }] } }]
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+
+  await withServer({
+    env: { AI_PROVIDER: "gemini", AI_MODEL: "gemini-2.5-flash", GEMINI_API_KEY: "synthetic-gemini-test-key" },
+    fetchImpl: fetchGemini,
+    requestLogger: (entry) => logEntries.push(entry)
+  }, async (baseUrl) => {
+    const results = [];
+    for (let index = 0; index < inputs.length; index += 1) {
+      const interactionId = `b000000${index}-0000-4000-8000-00000000000${index}`;
+      const requestId = `a000000${index}-0000-4000-8000-00000000000${index}`;
+      const message = inputs[index];
+      const response = await fetch(`${baseUrl}/v1/conversations`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Request-ID": requestId,
+          "X-Interaction-ID": interactionId,
+          "X-Message-Fingerprint": conversationFingerprint(interactionId, message)
+        },
+        body: JSON.stringify({ message, language: "tr-TR", history: [] })
+      });
+      const result = await response.json();
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get("Cache-Control"), "no-store");
+      assert.equal(response.headers.get("X-Request-ID"), requestId);
+      assert.equal(response.headers.get("X-Interaction-ID"), interactionId);
+      assert.equal(result.interactionId, interactionId);
+      results.push(result.reply);
+    }
+
+    assert.deepEqual(results, expectedReplies);
+  });
+
+  assert.equal(providerCalls.length, 3);
+  assert.deepEqual(providerCalls.map((call) => call.message), inputs);
+  assert.equal(new Set(providerCalls.map((call) => call.message)).size, 3);
+  assert.ok(providerCalls.every((call) => call.url.endsWith("/gemini-2.5-flash:generateContent")));
+  assert.ok(providerCalls.every((call) => call.apiKey === "synthetic-gemini-test-key"));
+
+  const geminiStarts = logEntries.filter((entry) => entry.event === "gemini_request_started");
+  const geminiReplies = logEntries.filter((entry) => entry.event === "gemini_response_received");
+  const receivedMessages = logEntries.filter((entry) => entry.event === "conversation_message_received");
+  assert.equal(geminiStarts.length, 3);
+  assert.equal(geminiReplies.length, 3);
+  assert.equal(receivedMessages.length, 3);
+  assert.deepEqual(receivedMessages.map((entry) => entry.clientFingerprintMatches), [true, true, true]);
+  assert.equal(new Set(geminiStarts.map((entry) => entry.requestId)).size, 3);
+  assert.deepEqual(geminiStarts.map((entry) => entry.interactionId), [
+    "b0000000-0000-4000-8000-000000000000",
+    "b0000001-0000-4000-8000-000000000001",
+    "b0000002-0000-4000-8000-000000000002"
+  ]);
+  const serializedLogs = JSON.stringify(logEntries);
+  assert.ok(inputs.every((input) => !serializedLogs.includes(input)));
+  assert.equal(serializedLogs.includes("synthetic-gemini-test-key"), false);
+});
+
+test("backend rejects a conversation body that does not match its transcript fingerprint", async () => {
+  const interactionId = "b1000000-0000-4000-8000-000000000000";
+  await withServer({ env: { AI_PROVIDER: "mock" } }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/v1/conversations`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Interaction-ID": interactionId,
+        "X-Message-Fingerprint": conversationFingerprint(interactionId, "previous phrase")
+      },
+      body: JSON.stringify({ message: "current phrase", language: "tr-TR" })
+    });
+    const result = await response.json();
+    assert.equal(response.status, 400);
+    assert.equal(result.error.code, "message_fingerprint_mismatch");
   });
 });
 
