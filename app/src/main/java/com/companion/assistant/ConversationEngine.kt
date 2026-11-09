@@ -220,7 +220,7 @@ internal class HttpConversationEngine(endpoint: String) : ConversationEngine {
             currentMessage
         )
         val returnedInteractionId = response.optString("interactionId")
-        if (returnedInteractionId != interactionId) {
+        if (returnedInteractionId.isNotEmpty() && returnedInteractionId != interactionId) {
             Log.e(
                 TAG,
                 "conversation_body_interaction_mismatch interactionId=$interactionId " +
@@ -317,13 +317,17 @@ internal class HttpConversationEngine(endpoint: String) : ConversationEngine {
             val code = connection.responseCode
             val returnedRequestId = connection.getHeaderField("X-Request-ID")
             val returnedInteractionId = connection.getHeaderField("X-Interaction-ID")
+            val interactionIdEchoed = !returnedInteractionId.isNullOrEmpty()
+            val interactionIdMatches = returnedInteractionId == interactionId
             Log.i(
                 TAG,
                 "http_response_received interactionId=$interactionId requestId=$requestId route=$route " +
                     "status=$code requestIdMatches=${returnedRequestId == requestId} " +
-                    "interactionIdMatches=${returnedInteractionId == interactionId}"
+                    "interactionIdEchoed=$interactionIdEchoed interactionIdMatches=$interactionIdMatches"
             )
-            if (returnedRequestId != requestId || returnedInteractionId != interactionId) {
+            // Earlier local Compose images echo X-Request-ID but predate interaction ID echoing.
+            // A present interaction ID must match; the unique request ID remains mandatory.
+            if (returnedRequestId != requestId || (interactionIdEchoed && !interactionIdMatches)) {
                 throw ConversationFailure("BULUT YANITININ İSTEK KİMLİĞİ EŞLEŞMEDİ")
             }
             val stream = if (code in 200..299) connection.inputStream else connection.errorStream

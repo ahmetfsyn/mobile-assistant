@@ -19,16 +19,18 @@ The Compose service has a health check against `/healthz`, restarts unless expli
 
 ## Start and operate
 
-Run this from the repository root to start on the Mac's Wi-Fi interface. It discovers the current address and starts or rebuilds the service in one command:
+Run this from the repository root to start on the Mac's Wi-Fi interface. macOS Wi-Fi is not always `en0`; this reads the current IPv4 address from the `Wi-Fi` network service and starts or rebuilds the service:
 
 ```sh
-MAC_LOCAL_IP="$(ipconfig getifaddr en0)" docker compose up -d --build
+MAC_LOCAL_IP="$(networksetup -getinfo Wi-Fi | awk -F': ' '/^IP address:/{print $2}')" \
+  docker compose up -d --build
 ```
 
 Check health from the Mac:
 
 ```sh
-curl --fail "http://$(ipconfig getifaddr en0):3000/healthz"
+MAC_LOCAL_IP="$(networksetup -getinfo Wi-Fi | awk -F': ' '/^IP address:/{print $2}')"
+curl --fail "http://${MAC_LOCAL_IP}:3000/healthz"
 docker compose ps
 ```
 
@@ -50,16 +52,18 @@ Stop the service:
 docker compose down
 ```
 
-Changing application code requires `MAC_LOCAL_IP="$(ipconfig getifaddr en0)" docker compose up -d --build` so Docker rebuilds the image. Changing only `backend/.env` requires recreating the container:
+Changing application code requires rebuilding the image. Changing only `backend/.env` requires recreating the container with the current Wi-Fi address:
 
 ```sh
-MAC_LOCAL_IP="$(ipconfig getifaddr en0)" docker compose up -d --force-recreate companion-api
+MAC_LOCAL_IP="$(networksetup -getinfo Wi-Fi | awk -F': ' '/^IP address:/{print $2}')" \
+  docker compose up -d --force-recreate companion-api
 ```
 
 To select another available model explicitly for the local service, set `COMPANION_LOCAL_MODEL` when recreating the container. Use the same value on later `docker compose up` commands so Compose keeps that model:
 
 ```sh
-COMPANION_LOCAL_MODEL=gemini-3.8-flash MAC_LOCAL_IP="$(ipconfig getifaddr en0)" \
+COMPANION_LOCAL_MODEL=gemini-3.8-flash \
+  MAC_LOCAL_IP="$(networksetup -getinfo Wi-Fi | awk -F': ' '/^IP address:/{print $2}')" \
   docker compose up -d --force-recreate companion-api
 ```
 
@@ -68,13 +72,14 @@ COMPANION_LOCAL_MODEL=gemini-3.8-flash MAC_LOCAL_IP="$(ipconfig getifaddr en0)" 
 Keep the Mac powered on, Docker Desktop running, and the Mac and phone connected to the same private Wi-Fi network. Find the Mac's Wi-Fi IPv4 address with:
 
 ```sh
-ipconfig getifaddr en0
+networksetup -getinfo Wi-Fi | awk -F': ' '/^IP address:/{print $2}'
 ```
 
-If this prints no address, check the Wi-Fi connection details in macOS System Settings; the Wi-Fi interface name may differ. The Compose startup command binds port `3000` only to this Wi-Fi address. Use the same address in the Android build, replacing `MAC_LOCAL_IP` with the address you found:
+If this prints no address, check the Wi-Fi connection details in macOS System Settings. The Wi-Fi device name can differ between Macs; querying the `Wi-Fi` network service avoids assuming the device is `en0`. The Compose startup command binds port `3000` only to this Wi-Fi address. Use the same address in the Android build, replacing `MAC_LOCAL_IP` with the address you found:
 
 ```sh
-./gradlew assembleDebug -PcompanionBackendUrl=http://MAC_LOCAL_IP:3000
+MAC_WIFI_IP="$(networksetup -getinfo Wi-Fi | awk -F': ' '/^IP address:/{print $2}')"
+./gradlew assembleDebug -PcompanionBackendUrl="http://${MAC_WIFI_IP}:3000"
 ```
 
 For example, the address has the form `http://192.168.x.x:3000`; do not place a real machine address in application source code. The equivalent environment-variable form is:
@@ -83,7 +88,7 @@ For example, the address has the form `http://192.168.x.x:3000`; do not place a 
 COMPANION_BACKEND_URL=http://MAC_LOCAL_IP:3000 ./gradlew assembleDebug
 ```
 
-The Gradle property takes precedence when both settings are provided. If the backend URL is empty or omitted, Android continues to use its existing mock conversation fallback. The provider key is never passed to Gradle or Android.
+The Gradle property takes precedence when both settings are provided, and its value is embedded in that APK at build time. The `ConversationEngineFactory` reports a configuration error if the URL is empty; it does not silently select the static mock response. The provider key is never passed to Gradle or Android.
 
 This HTTP setup is only for a trusted private LAN. It does not encrypt conversation text between the phone and Mac. Use a private Wi-Fi IPv4 address; do not use public Wi-Fi, configure router port forwarding, or expose port `3000` to the public internet. Docker binds the port to all interfaces if no host address is supplied, so this Compose file uses the selected Wi-Fi address and falls back to loopback if it is missing. If the Mac firewall blocks the phone, allow Docker Desktop or the local network connection in macOS Firewall settings. Router Wi-Fi client isolation can also prevent devices from reaching one another.
 
@@ -92,7 +97,8 @@ The address is available only while the Mac is powered on, connected to Wi-Fi, a
 If the Mac receives a different Wi-Fi address, recreate the container using the updated address:
 
 ```sh
-MAC_LOCAL_IP="$(ipconfig getifaddr en0)" docker compose up -d --force-recreate companion-api
+MAC_LOCAL_IP="$(networksetup -getinfo Wi-Fi | awk -F': ' '/^IP address:/{print $2}')" \
+  docker compose up -d --force-recreate companion-api
 ```
 
 ## Diagnose Android and Gemini
@@ -100,9 +106,10 @@ MAC_LOCAL_IP="$(ipconfig getifaddr en0)" docker compose up -d --force-recreate c
 Check the public configuration and send a synthetic request from the Mac. The last command calls the configured Gemini model and may use its quota:
 
 ```sh
-curl --fail "http://$(ipconfig getifaddr en0):3000/healthz"
-curl --fail "http://$(ipconfig getifaddr en0):3000/v1/config"
-curl --fail "http://$(ipconfig getifaddr en0):3000/v1/conversations" \
+MAC_WIFI_IP="$(networksetup -getinfo Wi-Fi | awk -F': ' '/^IP address:/{print $2}')"
+curl --fail "http://${MAC_WIFI_IP}:3000/healthz"
+curl --fail "http://${MAC_WIFI_IP}:3000/v1/config"
+curl --fail "http://${MAC_WIFI_IP}:3000/v1/conversations" \
   -H 'Content-Type: application/json' \
   -d '{"message":"Kısa bir bağlantı testi yanıtı ver.","language":"tr-TR","history":[]}'
 ```
