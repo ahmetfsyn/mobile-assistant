@@ -12,11 +12,15 @@ import android.os.Looper
 import android.text.InputType
 import android.view.View
 import android.view.WindowManager
+import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 class MainActivity : Activity() {
 
@@ -27,6 +31,11 @@ class MainActivity : Activity() {
     private var accessTokenStore: CompanionAccessTokenStore? = null
     private var memoryConsentStore: MemoryConsentStore? = null
     private var securityDialog: AlertDialog? = null
+    private var memoryDialog: AlertDialog? = null
+    private var memoryApiClient: MemoryApiClient? = null
+    private val memoryExecutor: ExecutorService = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "companion-memory-io").apply { isDaemon = true }
+    }
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val dismissRobotError = Runnable {
@@ -50,6 +59,7 @@ class MainActivity : Activity() {
         accessTokenStore = tokenStore
         val consentStore = MemoryConsentStore(applicationContext)
         memoryConsentStore = consentStore
+        memoryApiClient = MemoryApiClient(BuildConfig.COMPANION_BACKEND_URL, tokenStore::accessToken)
         core.dispatch(RobotEvent.PersistentMemoryConsentChanged(consentStore.isEnabled()))
         val speechInput = SpeechInputFactory.create(applicationContext)
         voiceController = VoiceInteractionController(
@@ -59,7 +69,8 @@ class MainActivity : Activity() {
             speechOutput = TextToSpeechManager(applicationContext),
             conversationEngine = ConversationEngineFactory.create(
                 endpoint = BuildConfig.COMPANION_BACKEND_URL,
-                accessTokenProvider = tokenStore::accessToken
+                accessTokenProvider = tokenStore::accessToken,
+                memoryConsentProvider = consentStore::isEnabled
             ),
             conversationHistory = SharedPreferencesConversationHistoryStore(applicationContext),
             onCaptionChanged = face::setCaption,
@@ -113,9 +124,14 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         securityDialog?.dismiss()
         securityDialog = null
+        memoryDialog?.dismiss()
+        memoryDialog = null
         dispatchRobotEvent(RobotEvent.CloseRequested)
         voiceController?.close()
         voiceController = null
+        memoryApiClient?.cancelRequests()
+        memoryExecutor.shutdownNow()
+        memoryApiClient = null
         mainHandler.removeCallbacksAndMessages(null)
         robotCore = null
         faceView?.destroy()
@@ -160,18 +176,27 @@ class MainActivity : Activity() {
             contentDescription = "Backend erişim anahtarı"
         }
         val memoryConsent = CheckBox(this).apply {
-            text = "Gelecekteki uzun süreli bellek için rıza"
+            text = "Uzun süreli hafızayı etkinleştir"
             isChecked = consentStore.isEnabled()
-            contentDescription = "Gelecekteki uzun süreli bellek için rıza"
+            contentDescription = "Uzun süreli hafızayı etkinleştir"
         }
         val memoryDetails = TextView(this).apply {
-            text = "Uzun süreli bellek bu sürümde etkin değil ve yeni anılar saklanmıyor. Bu tercih gelecekteki özellik için kaydedilir. Mevcut son sekiz mesaj sohbet bağlamı için Android'de tutulur."
+            text = "Açıldığında seçilen anılar yerel backend'de saklanır ve yanıt için yapılandırılmış AI sağlayıcısına gönderilebilir. Kapatmak yeni kayıt ve AI kullanımını durdurur; mevcut kayıtları silmez. Son sekiz sohbet mesajı Android'de tutulur."
             setPadding(0, (4f * resources.displayMetrics.density).toInt(), 0, 0)
+        }
+        val memoryManager = Button(this).apply {
+            text = "HAFIZAYI YÖNET"
+            contentDescription = "Kayıtlı anıları görüntüle, düzenle veya sil"
+            setOnClickListener {
+                securityDialog?.dismiss()
+                showMemoryManagement()
+            }
         }
         content.addView(details)
         content.addView(tokenInput)
         content.addView(memoryConsent)
         content.addView(memoryDetails)
+        content.addView(memoryManager)
 
         val dialog = AlertDialog.Builder(this)
             .setTitle("GÜVENLİK VE GİZLİLİK")
@@ -212,6 +237,215 @@ class MainActivity : Activity() {
                     View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
         }
         dialog.show()
+    }
+
+    private fun showMemoryManagement() {
+        if (isFinishing) return
+        val loading = AlertDialog.Builder(this)
+            .setTitle("UZUN SÜRELİ HAFIZA")
+            .setMessage("Kayıtlar yükleniyor…")
+            .setNegativeButton("KAPAT", null)
+            .create()
+        memoryDialog = loading
+        loading.setOnDismissListener { if (memoryDialog === loading) memoryDialog = null }
+        loading.show()
+        applyDialogImmersive(loading)
+        memoryExecutor.execute {
+            try {
+                val client = memoryApiClient ?: throw MemoryApiFailure("BELLEK İSTEMCİSİ KAPALI")
+                val status = client.status()
+                val memories = client.list()
+                mainHandler.post {
+                    if (isFinishing || isDestroyed) return@post
+                    loading.dismiss()
+                    displayMemoryList(status, memories)
+                }
+            } catch (error: Exception) {
+                mainHandler.post {
+                    if (isFinishing || isDestroyed) return@post
+                    loading.dismiss()
+                    showMemoryError(error)
+                }
+            }
+        }
+    }
+
+    private fun displayMemoryList(status: MemoryStatus, memories: List<StoredMemory>) {
+        if (isFinishing || memories.size > 100) return
+        val density = resources.displayMetrics.density
+        val rows = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding((18 * density).toInt(), 0, (18 * density).toInt(), 0)
+        }
+        val consentEnabled = memoryConsentStore?.isEnabled() == true
+        rows.addView(TextView(this).apply {
+            text = "Depo: ${if (status.available) "hazır" else "kullanılamıyor"} · ${status.activeCount} kayıt · " +
+                if (consentEnabled) "hafıza açık" else "hafıza kapalı"
+            setPadding(0, 0, 0, (12 * density).toInt())
+        })
+        rows.addView(TextView(this).apply {
+            text = "Hafızayı kapatmak kayıtları silmez. Kayıtları seçerek veya tümünü silerek kaldırabilirsin."
+            setPadding(0, 0, 0, (12 * density).toInt())
+        })
+        if (memories.isEmpty()) {
+            rows.addView(TextView(this).apply { text = "Kayıtlı anı yok." })
+        } else {
+            memories.forEach { memory ->
+                val item = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(0, (8 * density).toInt(), 0, (8 * density).toInt())
+                }
+                item.addView(TextView(this).apply {
+                    text = "${memory.category.toTurkishMemoryCategory()} · ${memory.key.replace('_', ' ')}"
+                    textSize = 15f
+                })
+                item.addView(TextView(this).apply {
+                    text = memory.value
+                    setPadding(0, (3 * density).toInt(), 0, (4 * density).toInt())
+                })
+                val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                actions.addView(Button(this@MainActivity).apply {
+                    text = "DÜZENLE"
+                    setOnClickListener { showEditMemory(memory) }
+                })
+                actions.addView(Button(this@MainActivity).apply {
+                    text = "SİL"
+                    setOnClickListener { confirmDeleteMemory(memory) }
+                })
+                item.addView(actions)
+                rows.addView(item)
+            }
+        }
+        val refresh = Button(this).apply {
+            text = "YENİLE"
+            setOnClickListener {
+                memoryDialog?.dismiss()
+                showMemoryManagement()
+            }
+        }
+        rows.addView(refresh)
+        val scrollView = ScrollView(this).apply { addView(rows) }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("KAYITLI ANILAR")
+            .setView(scrollView)
+            .setPositiveButton("KAPAT", null)
+            .setNeutralButton("TÜMÜNÜ SİL", null)
+            .create()
+        memoryDialog = dialog
+        dialog.setOnDismissListener { if (memoryDialog === dialog) memoryDialog = null }
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                confirmClearMemories()
+            }
+            applyDialogImmersive(dialog)
+        }
+        dialog.show()
+    }
+
+    private fun showEditMemory(memory: StoredMemory) {
+        val input = EditText(this).apply {
+            setText(memory.value)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            filters = arrayOf(android.text.InputFilter.LengthFilter(500))
+            minLines = 2
+            maxLines = 5
+            setSelection(text.length)
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("ANIYI DÜZENLE")
+            .setMessage(memory.key.replace('_', ' '))
+            .setView(input)
+            .setPositiveButton("KAYDET", null)
+            .setNegativeButton("VAZGEÇ", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val value = input.text?.toString()?.trim().orEmpty()
+                if (value.isBlank()) {
+                    Toast.makeText(this, "ANI BOŞ OLAMAZ", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                dialog.dismiss()
+                runMemoryOperation(
+                    operation = { (memoryApiClient ?: throw MemoryApiFailure("BELLEK İSTEMCİSİ KAPALI")).updateValue(memory, value) },
+                    successMessage = "ANI GÜNCELLENDİ"
+                )
+            }
+            applyDialogImmersive(dialog)
+        }
+        dialog.show()
+    }
+
+    private fun confirmDeleteMemory(memory: StoredMemory) {
+        AlertDialog.Builder(this)
+            .setTitle("ANIYI SİL?")
+            .setMessage("‘${memory.key.replace('_', ' ')}’ kaydı kalıcı olarak silinecek.")
+            .setPositiveButton("SİL") { _, _ ->
+                runMemoryOperation(
+                    operation = { (memoryApiClient ?: throw MemoryApiFailure("BELLEK İSTEMCİSİ KAPALI")).delete(memory.id) },
+                    successMessage = "ANI SİLİNDİ"
+                )
+            }
+            .setNegativeButton("VAZGEÇ", null)
+            .show()
+    }
+
+    private fun confirmClearMemories() {
+        AlertDialog.Builder(this)
+            .setTitle("TÜM ANILAR SİLİNSİN Mİ?")
+            .setMessage("Tüm uzun süreli bellek kayıtları kalıcı olarak silinecek. Sohbet geçmişi ayrı kalır.")
+            .setPositiveButton("TÜMÜNÜ SİL") { _, _ ->
+                runMemoryOperation(
+                    operation = { (memoryApiClient ?: throw MemoryApiFailure("BELLEK İSTEMCİSİ KAPALI")).clearAll() },
+                    successMessage = "TÜM ANILAR SİLİNDİ"
+                )
+            }
+            .setNegativeButton("VAZGEÇ", null)
+            .show()
+    }
+
+    private fun runMemoryOperation(operation: () -> Unit, successMessage: String) {
+        memoryExecutor.execute {
+            try {
+                operation()
+                mainHandler.post {
+                    if (isFinishing || isDestroyed) return@post
+                    Toast.makeText(this, successMessage, Toast.LENGTH_SHORT).show()
+                    memoryDialog?.dismiss()
+                    showMemoryManagement()
+                }
+            } catch (error: Exception) {
+                mainHandler.post {
+                    if (isFinishing || isDestroyed) return@post
+                    showMemoryError(error)
+                }
+            }
+        }
+    }
+
+    private fun showMemoryError(error: Exception) {
+        val message = (error as? MemoryApiFailure)?.message ?: "BELLEK İŞLEMİ TAMAMLANAMADI"
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun applyDialogImmersive(dialog: AlertDialog) {
+        dialog.window?.decorView?.systemUiVisibility =
+            View.SYSTEM_UI_FLAG_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+    }
+
+    private fun String.toTurkishMemoryCategory(): String = when (this) {
+        "profile" -> "Profil"
+        "preference" -> "Tercih"
+        "fact" -> "Bilgi"
+        "routine" -> "Rutin"
+        "summary" -> "Özet"
+        else -> this
     }
 
     private fun hasMicrophonePermission(): Boolean =

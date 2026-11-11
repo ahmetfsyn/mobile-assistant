@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { conversationFingerprint, createConversationServer, readRuntimeConfig } from "../src/server.mjs";
 
 async function withServer(options, run) {
-  const server = createConversationServer({ requestLogger: () => {}, ...options });
+  const server = createConversationServer({ memoryDatabasePath: ":memory:", requestLogger: () => {}, ...options });
   await new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(0, "127.0.0.1", resolve);

@@ -25,6 +25,8 @@ captures/
 .env.*
 !.env.example
 /backend/.env
+/backend/node_modules/
+/backend/data/
 /deploy/oracle-cloud/.env
 
 # macOS metadata

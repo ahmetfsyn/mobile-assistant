@@ -8,5 +8,8 @@
   "scripts": {
     "start": "node src/server.mjs",
     "test": "node --test"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.2.0"
   }
 }

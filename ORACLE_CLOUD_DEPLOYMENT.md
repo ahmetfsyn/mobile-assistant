@@ -143,7 +143,7 @@ sudo docker compose ps
 sudo docker compose logs --tail=100 companion-api caddy
 ```
 
-The API runs as the unprivileged `node` user with a read-only root filesystem, dropped Linux capabilities, a bounded temporary filesystem, and a health check against `/healthz`. Caddy also runs as an unprivileged UID; it receives only the bind capability needed for ports 80/443. Both services restart with Docker after host reboots unless explicitly stopped. Caddy certificate and configuration data are kept in named Docker volumes.
+The API runs as the unprivileged `node` user with a read-only root filesystem, dropped Linux capabilities, a bounded temporary filesystem, and a health check against `/healthz`. SQLite is stored at `/app/data/memories.sqlite` in the persistent `companion_data` named volume; it survives API image rebuilds. Caddy also runs as an unprivileged UID; it receives only the bind capability needed for ports 80/443. Both services restart with Docker after host reboots unless explicitly stopped. Caddy certificate/configuration and companion memory data are kept in named Docker volumes.
 
 Docker's rotating `local` log driver retains container stdout/stderr on the host (up to five 10 MB files per service). The API logs startup and fatal listener errors; it does not log API keys, message bodies, or per-request content. Caddy's normal operational and TLS errors are available through Compose logs.
 
@@ -202,7 +202,7 @@ sudo docker compose ps
 curl --fail https://companion.your-domain.example/healthz
 ```
 
-Do not use `docker compose down -v`; that would remove Caddy's persistent certificate volumes.
+Back up the `companion_data` volume before host migration. Do not use `docker compose down -v`; that would remove the companion memory database and Caddy's persistent certificate volumes.
 
 ## If there is no public domain
 

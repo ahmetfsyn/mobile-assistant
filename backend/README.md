@@ -1,6 +1,6 @@
 # Masa Arkadaşı Conversation API
 
-A small, provider-neutral HTTPS backend for the Android companion. It uses Node.js built-ins only and keeps all provider credentials on the server.
+A small, provider-neutral backend for the Android companion. It uses Node.js with a compact SQLite binding for local persistent memory and keeps all provider credentials on the server.
 
 ## Configure Gemini locally
 
@@ -27,6 +27,43 @@ npm start
 ```
 
 The server listens on `0.0.0.0:$PORT` (default port `10000`). Gemini is the default provider and `gemini-2.5-flash` is the default model. The existing OpenAI, Anthropic, and explicit `mock` adapters remain available. The service does not silently switch models or providers when Gemini is unavailable.
+
+## Persistent memory
+
+The backend stores structured memories in SQLite at `backend/data/memories.sqlite` when started from this directory. Change the path with `MEMORY_DB_PATH`. Docker Compose stores the database under `/app/data` in a named volume (`companion-data` locally, `companion_data` in the Oracle deployment); the database is outside the replaceable application image. Back up the volume before host migration or destructive Docker volume commands. Schema version 1 is tracked in `schema_migrations`; startup migrations do not drop existing data.
+
+Memory is off by default on Android. When enabled, Android explicitly sets `memoryEnabled: true`; older clients that omit it remain opted out. Deterministic Turkish rules save a small supported set of explicit coffee preferences, favorites, preferred forms of address, hobbies, simple routines, and current projects. `Bunu hatırla:` can save another safe fact. Questions, hypotheticals, obvious credentials and sensitive-content patterns are rejected; a repeated category/key updates its active record. Extraction is deliberately narrow and does not generate conversation summaries. The `summary` category is available to the validated API, but automatic summarization is not implemented.
+
+Before generation, local SQL token-overlap ranking selects at most five relevant records above a confidence threshold. The system prompt labels them as untrusted user data, not instructions; it asks the model to use only relevant entries, ask when a changed fact has no replacement value, and never claim absent memories. No memory values or raw messages are logged. Selected memory values are sent to the configured AI provider for that response; Android consent copy explains this. Turning memory off stops extraction and AI retrieval but leaves existing entries available in the explicit management screen until deleted. The recent eight-message Android history is separate.
+
+This is one shared local store for a one-person prototype, not per-device isolation. The optional access token can protect API routes, but local HTTP is unencrypted and SQLite is not encrypted at rest. Use only a trusted private network and non-sensitive memories. No cloud database, vector service, or synchronization is used.
+
+Turkish voice commands include `Bunu hatırla: ...`, `Benim hakkımda neler hatırlıyorsun?`, `Bunu hafızandan sil`, and `Tüm hafızanı sil`. Ambiguous individual voice deletions are refused; select the record in the app's memory management screen. That screen lists records, edits values, deletes individual entries, and confirms before clearing all. Memory deletion does not clear recent chat history.
+
+Manual local API smoke test (use a disposable non-sensitive fact; `memoryEnabled` is required for create):
+
+```sh
+curl -X POST http://127.0.0.1:3000/v1/memories \
+  -H 'Content-Type: application/json' \
+  -d '{"memoryEnabled":true,"category":"preference","key":"favorite_color","value":"blue"}'
+curl http://127.0.0.1:3000/v1/memories/status
+curl 'http://127.0.0.1:3000/v1/memories?limit=100'
+curl -X DELETE http://127.0.0.1:3000/v1/memories
+```
+
+If `COMPANION_ACCESS_TOKEN` is configured, add `-H 'Authorization: Bearer YOUR_LOCAL_TOKEN'` to each request. The final command permanently clears the memory store.
+
+| Method and path | Behavior |
+| --- | --- |
+| `GET /v1/memories/status` | Store availability and active record count. |
+| `GET /v1/memories?limit=100` | Explicit management list, bounded to 100 entries. |
+| `GET /v1/memories/:id` | Read one active record. |
+| `POST /v1/memories` | Create a validated record; requires `memoryEnabled: true`. |
+| `PATCH /v1/memories/:id` | Update validated fields; conflicting keys return `409`. |
+| `DELETE /v1/memories/:id` | Mark deleted and blank stored content fields. |
+| `DELETE /v1/memories` | Clear active records and blank their content fields. |
+
+If SQLite is unavailable, memory endpoints return a normalized error while normal conversations continue without memory. Run `npm test` for migration/persistence, extraction, updates, duplicate handling, relevance/confidence, delete/clear, auth, consent, prompt isolation, log redaction, and storage-failure tests.
 
 ## Make an actual Gemini request
 
@@ -71,7 +108,7 @@ To change models later, set `AI_MODEL` to an identifier available to the configu
 
 Generate a random access token with at least 32 characters (for example, `openssl rand -base64 32`) and set it as `COMPANION_ACCESS_TOKEN` in the backend's local `.env` or deployment secret store. Restart the backend after changing it. The Android app asks for the token after an authenticated request is rejected; it stores the value encrypted with Android Keystore and sends it only as an `Authorization: Bearer` header. The health endpoint remains public and does not expose the token.
 
-The current local Docker route uses private-LAN HTTP. A bearer token on HTTP is visible to a device observing that Wi-Fi traffic; keep this route on a trusted private network, do not forward the port publicly, and do not use it for sensitive persistent-memory data. Durable memory remains unavailable until a per-device pairing and authenticated encrypted transport are implemented and reviewed. Leaving the token blank preserves existing local development behavior and does not provide API authentication.
+The local Docker route uses private-LAN HTTP. A bearer token and memory requests on HTTP are visible to a device observing that Wi-Fi traffic; keep this route on a trusted private network and do not forward the port publicly. Persistent memory is now available only as an explicit-consent local prototype; avoid sensitive data because both LAN transport and SQLite-at-rest are unencrypted. The backend remains a single shared store, not per-device isolation. Leaving the token blank preserves existing development behavior and does not provide API authentication.
 
 ## API
 
@@ -114,7 +151,7 @@ The Gemini adapter sends the personality prompt as a system instruction, maps as
 
 For `gemini-3.8-flash`, the adapter requests low thinking effort and allows up to 1024 output tokens, including thinking tokens. It rejects `MAX_TOKENS` responses instead of speaking an incomplete fragment. Other configured Gemini models keep their own thinking defaults. The model remains configurable through `AI_MODEL`; the service never switches it silently. Request logs contain only a request ID, route, method, HTTP status, normalized error code, and duration. The Android client sends the same `X-Request-ID` so Logcat and Docker logs can be matched without logging transcripts, replies, audio, or keys.
 
-The accepted languages are `tr-TR` (default) and `en-US`. The server validates message sizes, bounds history to eight messages, limits request size and concurrency, and applies a per-process rate limit. Conversation history is supplied by Android and retained there as the last eight messages; the backend is stateless and does not store conversation text or microphone recordings.
+The accepted languages are `tr-TR` (default) and `en-US`. The server validates message sizes, bounds history to eight messages, limits request size and concurrency, and applies a per-process rate limit. Conversation history is supplied by Android and retained there as the last eight messages; the backend does not store raw conversation transcripts or microphone recordings. Structured opt-in memories are stored separately in the SQLite database.
 
 ## Quotas and rate limits
 

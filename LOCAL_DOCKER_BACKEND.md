@@ -17,6 +17,8 @@ The local `.env` file is read by Docker Compose and passed to the container as e
 
 The Compose service has a health check against `/healthz`, restarts unless explicitly stopped, and keeps rotated container logs. If the API key is empty or invalid, `/healthz` reports that the service is not configured and Compose marks it unhealthy.
 
+Long-term memories use the named Docker volume `companion-data`, mounted at `/app/data`; rebuilding the API container preserves the SQLite database. `docker compose down` keeps this volume. **Do not use `docker compose down -v`** unless you intend to permanently remove stored memories. Back up this volume before moving the service to another host. The database is not encrypted at rest.
+
 ## Start and operate
 
 Run this from the repository root to start on the Mac's Wi-Fi interface. macOS Wi-Fi is not always `en0`; this reads the current IPv4 address from the `Wi-Fi` network service and starts or rebuilds the service:

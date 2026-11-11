@@ -54,6 +54,37 @@ internal interface ConversationHistoryStore {
     fun appendTurn(userMessage: String, assistantMessage: String)
 }
 
+internal data class EncodedConversationBody(
+    val message: String,
+    val languageTag: String,
+    val history: List<ConversationMessage>,
+    val memoryEnabled: Boolean
+) {
+    fun toJsonObject(): JSONObject {
+        val messages = JSONArray()
+        history.forEach { entry ->
+            if ((entry.role == "user" || entry.role == "assistant") && entry.content.isNotBlank()) {
+                messages.put(JSONObject().put("role", entry.role).put("content", entry.content))
+            }
+        }
+        return JSONObject()
+            .put("message", message)
+            .put("language", languageTag)
+            .put("history", messages)
+            .put("memoryEnabled", memoryEnabled)
+    }
+}
+
+internal fun encodeConversationBody(
+    message: String,
+    language: VoiceLanguage,
+    history: List<ConversationMessage>,
+    memoryEnabled: Boolean
+): EncodedConversationBody {
+    val filteredHistory = history.filter { (it.role == "user" || it.role == "assistant") && it.content.isNotBlank() }
+    return EncodedConversationBody(message, language.tag, filteredHistory, memoryEnabled)
+}
+
 /** Stores only a bounded text history; microphone audio is never persisted. */
 internal class SharedPreferencesConversationHistoryStore(context: Context) : ConversationHistoryStore {
     private val preferences = context.applicationContext.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
@@ -153,7 +184,8 @@ internal class UnconfiguredConversationEngine : ConversationEngine {
 /** Thin Android client for the provider-neutral conversation API. */
 internal class HttpConversationEngine(
     endpoint: String,
-    private val accessTokenProvider: () -> String = { "" }
+    private val accessTokenProvider: () -> String = { "" },
+    private val memoryConsentProvider: () -> Boolean = { false }
 ) : ConversationEngine {
     private val baseUrl = endpoint.trim().trimEnd('/')
     private val requestGeneration = AtomicLong()
@@ -200,16 +232,10 @@ internal class HttpConversationEngine(
                 "fingerprint=$messageFingerprint preview=${VoiceDiagnostics.redactedPreview(currentMessage)}"
         )
         val configuration = fetchConfiguration(token, interactionId)
-        val messages = JSONArray()
-        history.takeLast(configuration.maxHistoryMessages).forEach { entry ->
-            if ((entry.role == "user" || entry.role == "assistant") && entry.content.isNotBlank()) {
-                messages.put(JSONObject().put("role", entry.role).put("content", entry.content))
-            }
-        }
-        val body = JSONObject()
-            .put("message", currentMessage)
-            .put("language", language.tag)
-            .put("history", messages)
+        val filteredHistory = history.takeLast(configuration.maxHistoryMessages)
+        val encodedBody = encodeConversationBody(currentMessage, language, filteredHistory, memoryConsentProvider())
+        val body = encodedBody.toJsonObject()
+        val messages = body.optJSONArray("history") ?: JSONArray()
         val bodyContainsExpectedMessage = body.optString("message") == currentMessage
         Log.i(
             TAG,
@@ -449,10 +475,11 @@ internal object ConversationEngineFactory {
     fun create(
         endpoint: String,
         useMock: Boolean = false,
-        accessTokenProvider: () -> String = { "" }
+        accessTokenProvider: () -> String = { "" },
+        memoryConsentProvider: () -> Boolean = { false }
     ): ConversationEngine {
         return when (modeFor(endpoint, useMock)) {
-            ConversationEngineMode.HTTP -> HttpConversationEngine(endpoint, accessTokenProvider)
+            ConversationEngineMode.HTTP -> HttpConversationEngine(endpoint, accessTokenProvider, memoryConsentProvider)
             ConversationEngineMode.MOCK -> MockConversationEngine()
             ConversationEngineMode.UNCONFIGURED -> UnconfiguredConversationEngine()
         }

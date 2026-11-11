@@ -36,4 +36,22 @@ class ConversationDiagnosticsTest {
     fun emptyPreviewDoesNotExposeOrInventTranscriptContent() {
         assertEquals("[empty]", VoiceDiagnostics.redactedPreview("   "))
     }
+
+    @Test
+    fun conversationRequestCarriesTheCurrentMemoryConsentAndBoundedHistory() {
+        val history = listOf(
+            ConversationMessage("system", "discard this"),
+            ConversationMessage("user", "Kahvemi şekersiz içerim."),
+            ConversationMessage("assistant", "Tamam.")
+        )
+
+        val enabled = encodeConversationBody("Bir kahve içesim var.", VoiceLanguage.TURKISH, history, memoryEnabled = true)
+        val disabled = encodeConversationBody("Bir kahve içesim var.", VoiceLanguage.TURKISH, history, memoryEnabled = false)
+
+        assertEquals(true, enabled.memoryEnabled)
+        assertEquals(false, disabled.memoryEnabled)
+        assertEquals(2, enabled.history.size)
+        assertEquals("tr-TR", enabled.languageTag)
+        assertEquals("Bir kahve içesim var.", enabled.message)
+    }
 }

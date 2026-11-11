@@ -1,10 +1,10 @@
 # Phased Robot Roadmap
 
-This roadmap is a sequence of **small, separately reversible deliveries**, not authorization to implement them all. Complexity is a rough one-engineer estimate after the specified dependencies are available; device-specific investigation and hardware procurement can dominate it. Every phase keeps the existing face, tap-to-talk, provider-neutral backend, local Docker route, Turkish default, and API 24 build working. Phase 1 is implemented. Phase 2's platform adapter is implemented, with physical-device acceptance still open. Phase 4's local personality/emotion implementation is in place and the face was visually reviewed on the GM 5 Plus (API 25); spoken-quality review remains open. Phase 5's optional access-token and consent gate is implemented, but per-device pairing, encrypted transport, and persistent memory remain gated. Phase 3 reliability soak and all later phases remain planned.
+This roadmap is a sequence of **small, separately reversible deliveries**, not authorization to implement them all. Complexity is a rough one-engineer estimate after the specified dependencies are available; device-specific investigation and hardware procurement can dominate it. Every phase keeps the existing face, tap-to-talk, provider-neutral backend, local Docker route, Turkish default, and API 24 build working. Phase 1 is implemented. Phase 2's platform adapter is implemented, with physical-device acceptance still open. Phase 4's local personality/emotion implementation is in place and the face was visually reviewed on the GM 5 Plus (API 25); spoken-quality review remains open. Phase 5 now has an initial consent-gated SQLite memory implementation; per-device isolation, encrypted local transport/storage, export, and automatic summaries remain open. Phase 3 reliability soak and all later phases remain planned.
 
 ## Priority and gates
 
-**Best near-term value:** Phase 1 → Phase 2 → Phase 3. The Phase 2 Android speech adapter is implemented; device-level Turkish accuracy and offline behavior still need verification before the voice path is considered dependable. Phase 4 adds character only after turn-taking is dependable. Before persistent personal data or actuators, complete authenticated local access and explicit consent design.
+**Best near-term value:** Phase 1 → Phase 2 → Phase 3. The Phase 2 Android speech adapter is implemented; device-level Turkish accuracy and offline behavior still need verification before the voice path is considered dependable. Phase 4 adds character only after turn-taking is dependable. Phase 5 currently permits only explicit-consent, non-sensitive prototype memories; authenticated encryption and per-device isolation are prerequisites for sensitive memories, remote access, tools, or actuators.
 
 | Phase | Outcome | Complexity | Additional hardware | 0 TL ongoing software/API path? |
 | --- | --- | --- | --- | --- |
@@ -12,7 +12,7 @@ This roadmap is a sequence of **small, separately reversible deliveries**, not a
 | 2 | Real Turkish STT — adapter implemented; device acceptance open | Medium–high, ~1–3 weeks | No | Yes if platform/Vosk path passes; service behavior must be verified |
 | 3 | Robust turn-taking and interruption | Medium, ~1–2 weeks | No | Yes |
 | 4 | Personality and bounded emotion — implemented; device review open | Medium, ~1–2 weeks | No | Yes locally; Gemini usage remains quota-dependent |
-| 5 | Consent/auth gate implemented; persistent memory gated | High, ~2–4 weeks | No; backup storage optional | Yes locally |
+| 5 | Consent-gated persistent memory — initial version implemented | High, ~2–4 weeks | No; backup storage optional | Yes locally |
 | 6 | Controlled autonomy and reminders | High, ~2–3 weeks | No | Yes if local-only triggers; optional Gemini calls must respect free quota |
 | 7 | Opt-in vision | High, ~2–4 weeks | No if phone camera geometry works | Yes for basic motion; ML may need host resources |
 | 8 | ESP32 sensor integration | High, ~2–4 weeks | Yes unless owned | Yes ongoing, **not zero up-front** |
@@ -53,14 +53,14 @@ Implemented the versioned Turkish-first `masa-arkadasi` profile, a local bounded
 
 ## Phase 5 — Persistent memory and privacy controls
 
-- **Objective/modules:** Add opt-in backend SQLite for structured facts, preferences, events, short-term summaries/TTL; user inspect/correct/export/delete UI; policy-governed context retrieval. Preserve current eight-message Android history during a deliberate migration.
-- **Dependencies/expected components:** Authenticated local pairing/transport and consent controls first; `MemoryStore`/`MemoryPolicy`/`ContextAssembler`, schema migrations, durable Docker volume/backup guide, Android memory controls. Select and test a stable Node SQLite binding rather than assuming experimental `node:sqlite` is production-ready.
-- **Acceptance/testing:** No facts stored without consent; provenance and expiry visible; correction wins over inferred fact; deletion clears canonical DB and Android context as appropriate; restore and upgrade tests; model context stays bounded; no raw audio/images. Test replay, duplicate facts, DB corruption, backups, and Mac-off behavior.
+- **Objective/modules:** Store opt-in structured profile/preferences/facts/routines in backend SQLite; support explicit summaries through the API but do not auto-summarize; provide Android inspect/edit/delete/clear controls and bounded relevant-context retrieval. Keep the existing eight-message Android history separate.
+- **Dependencies/expected components:** Implemented as `MemoryRepository`/`MemoryService`, versioned schema, Docker data volumes, consent provider, `MemoryApiClient`, and the security/privacy management dialog. The shared optional token is reused; no cloud database or pairing system was added.
+- **Acceptance/testing:** Tests cover migration/reopen, deterministic extraction, correction/upsert and duplicate prevention, retrieval/confidence bounds, consent off/on, auth, delete/clear, prompt isolation, log redaction, invalid payloads, and degraded operation when SQLite is unavailable. Raw audio and conversation dumps are not stored. Manual GM 5 Plus verification remains pending.
 - **Risk/cost:** Privacy, stale copies, schema migration, host disk failure. High; SQLite/software 0 TL; optional backup media costs money.
 
-### Phase 5 prerequisite status (2026-11-09)
+### Phase 5 implementation status (2026-11-11)
 
-The backend can optionally require a 32–512 character bearer token for config and conversation routes; the Android app stores a manually entered token encrypted with Android Keystore. A small face settings target provides access to the token and long-term-memory consent preference, which defaults off. This task adds no memory routes or memory facts. The current private-LAN HTTP path remains unencrypted; do not enable persistent memory until per-device pairing and an authenticated encrypted transport are implemented and reviewed.
+Android consent defaults off and is sent on each conversation request. When enabled, the backend applies deterministic Turkish rules to a narrow set of explicit statements and supports explicit safe fact saving, corrections, list/forget/clear commands. SQLite is mounted on a persistent Docker volume. Relevant records are confidence-filtered and bounded to five before they are passed as untrusted context to the configured provider. Android's management screen lists, edits values, deletes one record, and confirms clearing all. Disabling memory pauses extraction and provider retrieval but does not delete records; the user can still manage/delete them. The local route is HTTP and SQLite has no at-rest encryption, so this prototype must not store sensitive data. There is no automatic summary generation, export UI, per-device isolation, or GM 5 Plus memory-flow smoke test yet.
 
 ## Phase 6 — Controlled autonomy and reminders
 

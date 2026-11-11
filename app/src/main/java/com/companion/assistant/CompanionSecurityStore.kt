@@ -92,7 +92,7 @@ internal class CompanionAccessTokenStore(context: Context) {
     }
 }
 
-/** Explicit opt-in for future long-term memory. Defaults to off; this task stores no memory facts. */
+/** Explicit opt-in for backend memory extraction/retrieval. Defaults to off and never deletes records itself. */
 internal class MemoryConsentStore(context: Context) {
     private val preferences = context.applicationContext.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
 

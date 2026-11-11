@@ -1,10 +1,10 @@
 # Robot System Architecture
 
-Status: architecture proposal with **Phase 1 foundation implemented**. Android now has a synchronous `RobotCore` reducer, typed events/effects, activity snapshots, microphone permission and optional-consent fields, session generation, and lifecycle cancellation. The camera, action, autonomous, durable-memory, and hardware behaviors described below remain future work. See [vision](ROBOT_VISION.md), [technology choices](ROBOT_TECH_STACK.md), [roadmap](ROBOT_ROADMAP.md), [hardware plan](ROBOT_HARDWARE_PLAN.md), and [decisions](ROBOT_DECISIONS.md).
+Status: architecture proposal with **Phase 1 foundation and the initial Phase 5 memory milestone implemented**. Android has a synchronous `RobotCore` reducer, typed events/effects, activity snapshots, microphone permission and consent fields, session generation, lifecycle cancellation, and a memory manager. The backend has a consent-gated SQLite repository and bounded retrieval. Per-device identity, encrypted local storage/transport, automatic summaries, camera, autonomous actions, tools, and hardware behavior remain future work. See [vision](ROBOT_VISION.md), [technology choices](ROBOT_TECH_STACK.md), [roadmap](ROBOT_ROADMAP.md), [hardware plan](ROBOT_HARDWARE_PLAN.md), and [decisions](ROBOT_DECISIONS.md).
 
 ## 1. Baseline and migration boundary
 
-Android `MainActivity` now creates `RobotCore`, `FaceView`, `VoiceInteractionController`, `TextToSpeechManager`, and a `ConversationEngine`. `RobotCore` owns boot/idle/voice/error activity state, session generations, microphone permission, optional-consent state, and host pause/resume. It returns effects for the host to execute and rejects stale session events. `VoiceInteractionController` no longer owns a parallel activity state machine. `FaceBehavior` still owns autonomous **eye** behavior. The backend remains one stateless Node service: `GET /healthz`, `GET /v1/config`, and `POST /v1/conversations`. It validates a Turkish/English text turn and up to eight history messages, builds a system prompt, calls a selected provider, and returns a short reply. An optional shared-token gate protects config and conversation routes when configured; Android stores the token encrypted with Android Keystore. Android stores those eight text messages in `SharedPreferences`. A native Android speech recognition adapter is now the default, but the GM 5 Plus service's Turkish accuracy and offline behavior are not yet device-verified. There is no persistent robot memory, per-device pairing, authenticated encrypted device channel, camera, tool execution, or ESP32.
+Android `MainActivity` creates `RobotCore`, `FaceView`, `VoiceInteractionController`, `TextToSpeechManager`, and a `ConversationEngine`. `RobotCore` owns boot/idle/voice/error activity state, session generations, microphone permission, optional-consent state, and host pause/resume. It returns effects for the host to execute and rejects stale session events. `VoiceInteractionController` no longer owns a parallel activity state machine. `FaceBehavior` still owns autonomous **eye** behavior. The backend provides `GET /healthz`, `GET /v1/config`, `POST /v1/conversations`, and authenticated memory management endpoints. It bounds the eight-message history, uses opt-in structured SQLite memories, builds a bounded untrusted-memory prompt context, calls the selected provider, and returns a short reply. Android stores recent conversation text separately in `SharedPreferences`. The optional shared-token gate protects config, conversation, and memory routes when configured; Android stores the token encrypted with Android Keystore. A native Android speech recognition adapter is the default, but the GM 5 Plus service's Turkish accuracy and offline behavior remain unverified. Per-device isolation, encrypted memory storage/transport, camera, tool execution, and ESP32 remain unimplemented.
 
 Add **Robot Core on Android** as the single authority for the robot's visible/activity state, consent, session IDs, and device lifecycle. It receives events from the current voice controller and face; it does not replace their rendering/audio internals. Keep the backend as a **modular monolith** for AI, policy validation, future structured memory, and hardware gateway. The ESP32 later owns real-time electrical safety and rejects unsafe commands independently. A model never controls physical hardware directly.
 
@@ -18,7 +18,7 @@ flowchart LR
   Core --> Local["Local timers, preferences, short context"]
   Core -->|"versioned REST, request ID"| Api["Mac Node modular backend"]
   Api --> Personality["Personality + context assembly"]
-  Api --> Memory["Future SQLite memory"]
+  Api --> Memory["Consent-gated SQLite memory"]
   Api --> AI["Provider-independent AI gateway"]
   Api --> Tools["Future allowlisted tool executor"]
   AI --> Gemini["Optional Gemini / other API"]
@@ -36,7 +36,7 @@ flowchart LR
 | Voice Engine | Existing `AudioRecorder`, `SpeechRecognizer`, `TextToSpeechManager`, `VoiceInteractionController` behind adapters. One microphone owner per turn. STT returns transcript + engine/offline metadata; TTS emits started/completed/error. Future VAD replaces the present fixed RMS threshold behind the recorder interface. |
 | Personality Engine | Backend versioned configuration: stable traits, Turkish default, concise spoken style, honest capability claims. It produces prompt fragments and style bounds, not permissions or persistent facts. Android may hold a short offline greeting profile. |
 | Emotion Engine | Android deterministic bounded vector, e.g. valence, arousal, curiosity, energy, engagement in `[0,1]`. Inputs are trusted events (interaction, response, inactivity), each has capped influence and decay. Emits face cue and optional TTS rate/pitch bounds. AI may suggest a cue, but Core validates/clamps it; model text cannot overwrite the state. |
-| Memory Engine | Current Android eight-message history remains through initial phases. Future canonical durable memory lives in one Mac/backend SQLite database, with opt-in scope, provenance, expiry, and deletion. Working turn data stays in RAM; Android can keep the existing bounded context, never an independent long-term truth. |
+| Memory Engine | Implemented initial backend SQLite repository/service stores structured profile, preference, fact, routine, and API-created summary records with source turn ID, confidence, timestamps, and active/deleted status. Android's existing last-eight history remains separate. Memory extraction and provider-context retrieval run only when Android sends explicit opt-in; retrieval is relevance-ranked and capped at five records. |
 | AI Engine | Backend context assembly, intent/tool proposal, provider adapter, response validation. Keep `createProvider` and current Gemini/OpenAI/Anthropic/mock adapters. Optional local model adapter has the same normalized contract. Generation does not execute tools. |
 | Autonomy Engine | Android local event scheduler and policy evaluator; no background model polling. Candidate actions require consent, cooldown, quiet-hour, presence-confidence, and budget checks. Backend is called only for an approved turn or action that truly needs AI. |
 | Tool Engine | Backend allowlist with strict typed schemas, capability-specific permission, effect class (read-only / side effect / hazardous), resource bounds, idempotency, and audit event. Android presents consent. Hardware gateway and ESP revalidate commands. |
@@ -50,7 +50,7 @@ flowchart LR
 | Face, touch, lifecycle, permissions, user-visible state | **Owner** | — | — | — |
 | Audio capture, on-device STT candidate, TTS | **Owner** | Optional offline STT fallback | — | Optional STT/TTS only after explicit cost/privacy review |
 | AI request/context and provider secrets | Thin client | **Owner** | — | Selected text generation only |
-| Canonical persistent memory, tool policy, schedules requiring host | UI/consent and small context cache | **Owner after implementation** | — | No durable memory |
+| Canonical persistent memory, tool policy, schedules requiring host | UI/consent and bounded recent context | **Memory owner** | — | Relevant consented memories may be included in a generation request |
 | Camera session | **Owner if enabled** | Optional heavier inference | Optional external camera module later | Optional, consented image processing only |
 | Servo/sensor real-time safety | Stop/authorization request | Validated command gateway | **Final authority** | No direct access |
 
@@ -109,8 +109,8 @@ Interruption priority: physical stop > app pause/permission revocation > user ta
 flowchart TD
   Turn["Current turn in RAM; deleted at completion"] --> Context["Bounded context assembler"]
   Recent["Existing Android last 8 text messages"] --> Context
-  Short["Future SQLite short-term summaries + TTL"] --> Retrieve["Scoped retrieval"]
-  Long["Future SQLite facts, preferences, events"] --> Retrieve
+  Short["Future summaries + TTL (planned)"] --> Retrieve["Scoped retrieval"]
+  Long["Opt-in SQLite facts and preferences"] --> Retrieve
   Retrieve --> Context
   Policy["Consent + sensitivity + expiry policy"] --> Short
   Policy --> Long
@@ -120,17 +120,17 @@ flowchart TD
   User --> Short
 ```
 
-Working memory is ephemeral per turn. The existing Android history remains a bounded context source while migration is planned; it is not automatically uploaded as long-term memory. The future backend database is the **single durable authority**. Candidate facts are extracted from completed turns, then filtered by sensitivity, confidence, consent, and novelty before storage. A fact has `id`, `type`, `value`, `sourceTurnId`, `createdAt`, `expiresAt`, `confidence`, `consentScope`, and `updatedAt`; explicit user corrections outrank inferred facts. Short-term summaries expire (starting proposal: seven days), normal events expire unless kept, and user preferences persist until deleted. These retention values require product review before implementation. No raw audio or camera frames enter the memory store by default.
+Working memory is ephemeral per turn. The existing Android history remains a bounded context source and is not long-term memory. The backend SQLite database is the **single durable memory authority**. Version 1 stores `id`, `category`, `key`, `value`, `sourceRef`, `createdAt`, `updatedAt`, `lastAccessedAt`, `confidence`, `importance`, and active/deleted status. Deterministic explicit-statement patterns avoid questions/hypotheticals and reject several obvious sensitive-data classes; matching category/key corrections update the active record. Deletion marks a record deleted and blanks its user-content fields. There is no TTL or automatic summary extraction in this first implementation. No raw audio or conversation dump is stored.
 
 | Layer | Proposed contents and lifetime |
 | --- | --- |
 | Working | Current intent, transcript, request ID, and tool candidate in RAM for one turn; zero/discard on completion. |
 | Conversation | Existing last eight Android text messages; bounded context, removable with app data or a future explicit clear control. |
-| Short-term | Consented session summaries and recent relevant events in backend SQLite with expiry; never a raw audio archive. |
-| Long-term | Explicitly useful facts and user preferences with provenance, confidence, corrections, and deletion. |
+| Short-term | Existing eight-message Android text context, held separately in SharedPreferences. |
+| Long-term | Opt-in backend facts/preferences/routines with source turn, confidence, updates, and deletion. |
 | Relationship/context | Consented interaction preferences such as preferred name or quiet hours; no inferred intimacy score or claim of human attachment. |
 
-Retrieval begins with indexed SQL and optional FTS5; small personal data does not justify a vector database. Use a few relevant facts under a token budget. An optional embedding/vector index comes only after retrieval quality tests show a measurable gap and its compute/storage/privacy costs are accepted. Provide transactionally consistent delete/export and clear Android's existing SharedPreferences history separately; warn that backups require their own deletion policy.
+Retrieval currently scores a bounded set of up to 500 active rows using lightweight normalized token overlap and returns at most five records above the confidence threshold. A vector database is not justified for this local dataset. Revisit retrieval quality only if tests show a measurable gap. The app supports inspect/edit/delete and clear-all; export UI is not implemented. Deleting long-term memory intentionally does not clear Android's separate recent conversation history. Backups of the Docker volume require their own deletion policy.
 
 Personality traits are stable configuration, not learned permission. Emotion is a transient local vector that decays toward calm; it may change face cues and TTS delivery within accessibility-safe bounds. Model-generated emotional suggestions and memories are proposals, never authoritative writes.
 

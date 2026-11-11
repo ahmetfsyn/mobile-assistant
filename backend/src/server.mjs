@@ -5,6 +5,8 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createProvider, ProviderError } from "./providers.mjs";
 import { buildSystemPrompt } from "./personality.mjs";
+import { MemoryConflictError, MemoryNotFoundError, MemoryRepository } from "./memory-repository.mjs";
+import { MemoryInputError, MemoryService, renderMemoryContext } from "./memory-service.mjs";
 
 const localEnvPath = resolve(dirname(fileURLToPath(import.meta.url)), "../.env");
 
@@ -121,10 +123,15 @@ function validateConversationBody(value) {
   if (language !== "tr-TR" && language !== "en-US") {
     throw new ApiError("unsupported_language", 400, "language must be tr-TR or en-US.");
   }
+  if (value.memoryEnabled !== undefined && typeof value.memoryEnabled !== "boolean") {
+    throw new ApiError("invalid_memory_consent", 400, "memoryEnabled must be a boolean.");
+  }
   return {
     message: value.message.trim(),
     language,
-    history: parseHistory(value.history)
+    history: parseHistory(value.history),
+    // Older clients stay safe: persistent memory is opt-in and defaults off.
+    memoryEnabled: value.memoryEnabled === true
   };
 }
 
@@ -200,7 +207,8 @@ export function createConversationServer({
   env = process.env,
   fetchImpl = globalThis.fetch,
   now = Date.now,
-  requestLogger = (entry) => console.info(JSON.stringify(entry))
+  requestLogger = (entry) => console.info(JSON.stringify(entry)),
+  memoryDatabasePath = String(env.MEMORY_DB_PATH ?? "./data/memories.sqlite").trim()
 } = {}) {
   const config = readRuntimeConfig(env);
   let provider;
@@ -211,8 +219,15 @@ export function createConversationServer({
   }
   const allowRequest = createRateLimiter(config.rateLimitPerMinute, now);
   let activeGenerations = 0;
+  let memoryRepository = null;
+  try {
+    memoryRepository = new MemoryRepository(memoryDatabasePath || "./data/memories.sqlite");
+  } catch (error) {
+    requestLogger({ event: "memory_store_unavailable", errorType: error?.constructor?.name ?? "Error" });
+  }
+  const memoryService = new MemoryService(memoryRepository);
 
-  return createNodeServer(async (request, response) => {
+  const server = createNodeServer(async (request, response) => {
     const suppliedId = request.headers["x-request-id"];
     const requestId = typeof suppliedId === "string" &&
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(suppliedId)
@@ -224,9 +239,17 @@ export function createConversationServer({
       : randomUUID();
     response.setHeader("X-Request-ID", requestId);
     response.setHeader("X-Interaction-ID", interactionId);
-    const route = request.url === "/v1/conversations" ? "conversation"
-      : request.url === "/v1/config" ? "config"
-        : request.url === "/healthz" ? "health" : "other";
+    const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
+    const memoryItemMatch = /^\/v1\/memories\/([0-9a-f-]{36})$/iu.exec(pathname);
+    const isMemoryStatus = request.method === "GET" && pathname === "/v1/memories/status";
+    const isMemoryCollection = pathname === "/v1/memories" && ["GET", "POST", "DELETE"].includes(request.method);
+    const isMemoryItem = memoryItemMatch !== null && ["GET", "PATCH", "DELETE"].includes(request.method);
+    const isMemoryRequest = isMemoryStatus || isMemoryCollection || isMemoryItem;
+    const isConfigRequest = request.method === "GET" && pathname === "/v1/config";
+    const isConversationRequest = request.method === "POST" && pathname === "/v1/conversations";
+    const route = isConversationRequest ? "conversation"
+      : isConfigRequest ? "config"
+        : isMemoryRequest ? "memory" : pathname === "/healthz" ? "health" : "other";
     if (route !== "health") {
       const startedAt = Date.now();
       requestLogger({ event: "request_received", interactionId, requestId, route, method: request.method });
@@ -262,9 +285,7 @@ export function createConversationServer({
       return;
     }
 
-    const isConfigRequest = request.method === "GET" && request.url === "/v1/config";
-    const isConversationRequest = request.method === "POST" && request.url === "/v1/conversations";
-    if (!isConfigRequest && !isConversationRequest) {
+    if (!isConfigRequest && !isConversationRequest && !isMemoryRequest) {
       sendError(response, new ApiError("not_found", 404, "The requested endpoint does not exist."));
       return;
     }
@@ -293,6 +314,75 @@ export function createConversationServer({
         language: "tr-TR",
         maxHistoryMessages: MAX_HISTORY_MESSAGES
       });
+      return;
+    }
+
+    if (isMemoryRequest) {
+      try {
+        if (!memoryRepository) throw new ApiError("memory_unavailable", 503, "The local memory store is unavailable.");
+        if (isMemoryStatus) {
+          sendJson(response, 200, memoryService.status());
+          return;
+        }
+        if (isMemoryCollection && request.method === "GET") {
+          const requestedLimit = Number.parseInt(new URL(request.url, "http://localhost").searchParams.get("limit") ?? "100", 10);
+          sendJson(response, 200, { memories: memoryService.list(Number.isFinite(requestedLimit) ? requestedLimit : 100) });
+          return;
+        }
+        if (isMemoryCollection && request.method === "POST") {
+          const body = await readJsonBody(request);
+          const memory = memoryService.create(body, { consentEnabled: body?.memoryEnabled === true });
+          sendJson(response, 201, { memory });
+          return;
+        }
+        if (isMemoryCollection && request.method === "DELETE") {
+          const deletedCount = memoryService.clearAll();
+          sendJson(response, 200, { deletedCount });
+          return;
+        }
+        if (isMemoryItem && request.method === "GET") {
+          const memory = memoryService.get(memoryItemMatch[1]);
+          if (!memory) throw new ApiError("memory_not_found", 404, "The requested memory does not exist.");
+          sendJson(response, 200, { memory });
+          return;
+        }
+        if (isMemoryItem && request.method === "PATCH") {
+          const body = await readJsonBody(request);
+          const memory = memoryService.update(memoryItemMatch[1], body);
+          if (!memory) throw new ApiError("memory_not_found", 404, "The requested memory does not exist.");
+          sendJson(response, 200, { memory });
+          return;
+        }
+        if (isMemoryItem && request.method === "DELETE") {
+          const deleted = memoryService.delete(memoryItemMatch[1]);
+          if (!deleted) throw new ApiError("memory_not_found", 404, "The requested memory does not exist.");
+          sendJson(response, 200, { deleted: true });
+          return;
+        }
+      } catch (error) {
+        if (error instanceof ApiError) {
+          sendError(response, error);
+          return;
+        }
+        if (error instanceof MemoryInputError) {
+          const status = error.code === "memory_consent_required" ? 403 : 400;
+          const message = error.code === "memory_consent_required"
+            ? "Enable memory consent before saving a memory."
+            : "The memory data is invalid or contains disallowed sensitive information.";
+          sendError(response, new ApiError(error.code, status, message));
+          return;
+        }
+        if (error instanceof MemoryConflictError) {
+          sendError(response, new ApiError("memory_conflict", 409, "An active memory already exists for this category and key."));
+          return;
+        }
+        if (error instanceof MemoryNotFoundError) {
+          sendError(response, new ApiError("memory_not_found", 404, "The requested memory does not exist."));
+          return;
+        }
+        requestLogger({ event: "memory_store_request_failed", requestId, interactionId, errorType: error?.constructor?.name ?? "Error" });
+        sendError(response, new ApiError("memory_unavailable", 503, "The local memory store could not complete the request."));
+      }
       return;
     }
 
@@ -332,10 +422,30 @@ export function createConversationServer({
       if (clientFingerprintProvided && !clientFingerprintMatches) {
         throw new ApiError("message_fingerprint_mismatch", 400, "The conversation message did not match its request fingerprint.");
       }
+
+      const memoryOutcome = memoryService.processTurn({
+        message: body.message,
+        history: body.history,
+        enabled: body.memoryEnabled,
+        interactionId
+      });
+      if (memoryOutcome.storageUnavailable) {
+        requestLogger({ event: "memory_store_operation_unavailable", requestId, interactionId });
+      }
+      if (memoryOutcome.directReply) {
+        sendJson(response, 200, {
+          reply: memoryOutcome.directReply,
+          provider: "local-memory",
+          model: "memory-policy",
+          interactionId
+        });
+        return;
+      }
       const configIssue = configurationError(config);
       if (configIssue) throw configIssue;
+      const memoryPrompt = renderMemoryContext(memoryOutcome.memories ?? [], { savedCount: memoryOutcome.savedCount ?? 0 });
       const messages = [
-        { role: "system", content: buildSystemPrompt(body.language, config.personality) },
+        { role: "system", content: `${buildSystemPrompt(body.language, config.personality)}\n\n${memoryPrompt}` },
         ...body.history,
         { role: "user", content: body.message }
       ];
@@ -401,6 +511,8 @@ export function createConversationServer({
       activeGenerations -= 1;
     }
   });
+  server.once("close", () => memoryRepository?.close());
+  return server;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
