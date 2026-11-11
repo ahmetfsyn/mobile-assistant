@@ -30,13 +30,13 @@ The server listens on `0.0.0.0:$PORT` (default port `10000`). Gemini is the defa
 
 ## Persistent memory
 
-The backend stores structured memories in SQLite at `backend/data/memories.sqlite` when started from this directory. Change the path with `MEMORY_DB_PATH`. Docker Compose stores the database under `/app/data` in a named volume (`companion-data` locally, `companion_data` in the Oracle deployment); the database is outside the replaceable application image. Back up the volume before host migration or destructive Docker volume commands. Schema version 1 is tracked in `schema_migrations`; startup migrations do not drop existing data.
+The backend stores structured memories, reminder mirrors, and autonomy settings in SQLite at `backend/data/memories.sqlite` when started from this directory. Change the path with `MEMORY_DB_PATH`. Docker Compose stores the database under `/app/data` in a named volume (`companion-data` locally, `companion_data` in the Oracle deployment); the database is outside the replaceable application image. Back up the volume before host migration or destructive Docker volume commands. Schema versions are tracked in `schema_migrations`; migration 2 adds reminder/settings tables without dropping existing data.
 
 Memory is off by default on Android. When enabled, Android explicitly sets `memoryEnabled: true`; older clients that omit it remain opted out. Deterministic Turkish rules save a small supported set of explicit coffee preferences, favorites, preferred forms of address, hobbies, simple routines, and current projects. `Bunu hatırla:` can save another safe fact. Questions, hypotheticals, obvious credentials and sensitive-content patterns are rejected; a repeated category/key updates its active record. Extraction is deliberately narrow and does not generate conversation summaries. The `summary` category is available to the validated API, but automatic summarization is not implemented.
 
 Before generation, local SQL token-overlap ranking selects at most five relevant records above a confidence threshold. The system prompt labels them as untrusted user data, not instructions; it asks the model to use only relevant entries, ask when a changed fact has no replacement value, and never claim absent memories. No memory values or raw messages are logged. Selected memory values are sent to the configured AI provider for that response; Android consent copy explains this. Turning memory off stops extraction and AI retrieval but leaves existing entries available in the explicit management screen until deleted. The recent eight-message Android history is separate.
 
-This is one shared local store for a one-person prototype, not per-device isolation. The optional access token can protect API routes, but local HTTP is unencrypted and SQLite is not encrypted at rest. Use only a trusted private network and non-sensitive memories. No cloud database, vector service, or synchronization is used.
+This is one shared local store for a one-person prototype, not per-device isolation. The optional access token can protect API routes, but local HTTP is unencrypted and SQLite is not encrypted at rest. Use only a trusted private network and non-sensitive memories. No cloud database or vector service is used. The Android reminder database and `AlarmManager` are the delivery authority; authenticated reminder/settings routes provide a best-effort local backend mirror and are not a scheduling service.
 
 Turkish voice commands include `Bunu hatırla: ...`, `Benim hakkımda neler hatırlıyorsun?`, `Bunu hafızandan sil`, and `Tüm hafızanı sil`. Ambiguous individual voice deletions are refused; select the record in the app's memory management screen. That screen lists records, edits values, deletes individual entries, and confirms before clearing all. Memory deletion does not clear recent chat history.
 
@@ -62,6 +62,21 @@ If `COMPANION_ACCESS_TOKEN` is configured, add `-H 'Authorization: Bearer YOUR_L
 | `PATCH /v1/memories/:id` | Update validated fields; conflicting keys return `409`. |
 | `DELETE /v1/memories/:id` | Mark deleted and blank stored content fields. |
 | `DELETE /v1/memories` | Clear active records and blank their content fields. |
+
+## Reminder and autonomy API
+
+The Android app stores and schedules reminders locally first. It mirrors changes to these routes when a backend URL is configured; a missing Mac connection does not prevent local alarm delivery. The API never schedules alarms, sends reminders, or calls Gemini on its own. Reminder requests use the same optional bearer-token protection as memory routes.
+
+| Method and path | Behavior |
+| --- | --- |
+| `GET /v1/reminders` | List up to 100 non-deleted reminder mirrors. |
+| `POST /v1/reminders` | Create an idempotent reminder mirror with client UUID, validated local timezone, time, recurrence, and status. |
+| `PATCH /v1/reminders/:id` | Update reminder text, time, timezone, recurrence, delivery status, and timestamps. |
+| `DELETE /v1/reminders/:id` | Mark a reminder mirror deleted. |
+| `GET /v1/autonomy` | Read stored consent and quiet-hour settings. Defaults are autonomy/speech off and quiet hours 23:00–08:00 on. |
+| `PUT /v1/autonomy` | Validate and update consent and quiet-hour preferences. |
+
+The phone currently treats its own reminder records as authoritative; remote reminders are not imported into the device scheduler. This prevents backend availability or synchronization races from becoming a delivery dependency.
 
 If SQLite is unavailable, memory endpoints return a normalized error while normal conversations continue without memory. Run `npm test` for migration/persistence, extraction, updates, duplicate handling, relevance/confidence, delete/clear, auth, consent, prompt isolation, log redaction, and storage-failure tests.
 

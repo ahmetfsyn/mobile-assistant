@@ -21,7 +21,8 @@ internal class VoiceInteractionController(
     private val onCaptionChanged: (String?) -> Unit = {},
     private val personalityProfile: PersonalityProfile = PersonalityProfile.DEFAULT,
     private val onFaceCueChanged: (FaceCue) -> Unit = {},
-    private val onAuthenticationRequired: () -> Unit = {}
+    private val onAuthenticationRequired: () -> Unit = {},
+    private val reminderCommandProcessor: ReminderCommandProcessor? = null
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val recognitionExecutor: ExecutorService = Executors.newSingleThreadExecutor { task ->
@@ -97,6 +98,53 @@ internal class VoiceInteractionController(
         activeSessionId = null
         activeInteractionId = null
         onCaptionChanged(null)
+    }
+
+    /** Starts only an explicitly scheduled reminder, and only if RobotCore grants the idle-state transition. */
+    fun speakProactiveReminder(message: String, onFinished: (Boolean) -> Unit) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { speakProactiveReminder(message, onFinished) }
+            return
+        }
+        if (closed || message.isBlank() || activeSessionId != null) {
+            onFinished(false)
+            return
+        }
+        robotCore.dispatch(RobotEvent.ProactiveReminderStarted)
+        if (robotCore.snapshot.activity != RobotActivityState.PROACTIVE_SPEAKING) {
+            onFinished(false)
+            return
+        }
+        val session = robotCore.snapshot.sessionId
+        val interactionId = UUID.randomUUID().toString()
+        activeSessionId = session
+        activeInteractionId = interactionId
+        speechOutput.speak(
+            message,
+            VoiceLanguage.TURKISH,
+            personalityProfile.voiceDeliveryFor(emotionState),
+            object : SpeechOutput.Callback {
+                override fun onStarted() {
+                    Log.i(TAG, "proactive_tts_started interactionId=$interactionId session=$session")
+                }
+
+                override fun onCompleted() = dispatchOnMain {
+                    if (closed || activeSessionId != session || activeInteractionId != interactionId) return@dispatchOnMain
+                    activeSessionId = null
+                    activeInteractionId = null
+                    robotCore.dispatch(RobotEvent.ProactiveReminderFinished(session))
+                    onFinished(true)
+                }
+
+                override fun onError(message: String) = dispatchOnMain {
+                    if (closed || activeSessionId != session || activeInteractionId != interactionId) return@dispatchOnMain
+                    activeSessionId = null
+                    activeInteractionId = null
+                    robotCore.dispatch(RobotEvent.ProactiveReminderFailed(session))
+                    onFinished(false)
+                }
+            }
+        )
     }
 
     fun close() {
@@ -216,7 +264,9 @@ internal class VoiceInteractionController(
                             "messageFingerprint=${VoiceDiagnostics.fingerprint(interactionId, transcript)} " +
                             "historyCount=${priorMessages.size}"
                     )
-                    val generatedReply = conversationEngine.respond(transcript, language, priorMessages, interactionId)
+                    val localReminderReply = reminderCommandProcessor?.process(transcript)
+                    val generatedReply = if (localReminderReply != null) ConversationReply(localReminderReply)
+                    else conversationEngine.respond(transcript, language, priorMessages, interactionId)
                     if (generatedReply.text.isNotBlank()) reply = generatedReply
                     else failure = "BULUT ASİSTANI BOŞ YANIT VERDİ"
                 } catch (error: Exception) {

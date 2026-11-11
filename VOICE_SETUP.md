@@ -92,3 +92,11 @@ Varsayılan dil `tr-TR`'dir; Android yalnızca uygulama açıkça İngilizceye g
 - AI servisi `mock` görünüyorsa backend `AI_PROVIDER` değerini değiştirip servisi yeniden başlatın.
 
 Gerçek sağlayıcı anahtarı olmadan yapılan backend testleri sadece sahte yanıtları ve adaptör sözleşmelerini doğrular; gerçek AI üretimini doğrulamaz. `gemini-2.5-flash` hesaba açık değilse desteklenen bir model adını backend'deki `AI_MODEL` değerine girin; uygulama sessizce başka modele geçmez.
+
+## Hatırlatmalar ve kontrollü otonomi
+
+Yüz panelindeki ayarlar → **Güvenlik ve Gizlilik** → **Otonomi ve Hatırlatıcılar** yolunu açın. İlk kurulumda hatırlatmalar ve sesli proaktif konuşma kapalı, 23:00–08:00 sessiz saatler açıktır. Hatırlatma eklemek tek başına konuşma izni vermez; teslimatı başlatmak için otonomiyi açıkça etkinleştirin. Sesli teslimat ayrıca ayrı bir tercihtir. Sessiz saatlerde veya robot konuşma/dinleme durumundayken hatırlatma ertelenir; uygulama arka plandaysa hatırlatma sessiz Android bildirimi olarak gösterilir.
+
+Anlaşılır Türkçe örnekler: “Yarın saat 10'da toplantıyı hatırlat”, “30 dakika sonra su içmemi hatırlat”, “Her sabah saat 9'da beni selamla” ve “Her pazartesi saat 10'da haftalık planımı hatırlat”. Saat belirsiz veya geçmişse robot kayıt yapmadan netleştirme ister. “Bugünkü hatırlatmalarım neler?”, “Hatırlatmaları kapat”, “Hatırlatmaları tekrar aç”, “Toplantı hatırlatmasını sil”, “... hatırlatmasını duraklat/tamamla” gibi açık komutlar desteklenir. Hatırlatma düzenleme ve diğer CRUD işlemleri yönetim ekranındadır. Hatırlatma metni Gemini'ye gönderilmez; backend route'ları yalnızca yerel Docker backend yapılandırılmışsa en iyi çabayla aynalanır.
+
+Android yerel SQLite hatırlatma verisini ve inexact AlarmManager alarmlarını kullanır; backend veya Wi-Fi alarm teslimi için gerekmez. Yeniden başlatma, uygulama güncellemesi, saat ve timezone değişikliklerinde alarmlar yeniden kurulur. Android/GM 5 Plus pil yöneticisi teslimi geciktirebilir; fiziksel cihazda reboot, uygulama süreci kapalıyken bildirim, sessiz saat, TTS hatası ve aktif konuşma ertelemesini ayrıca sınayın. Ayrıntılı prosedür: [`docs/PHASE6_REMINDERS.md`](docs/PHASE6_REMINDERS.md).

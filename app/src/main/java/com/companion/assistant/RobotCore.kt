@@ -7,6 +7,7 @@ internal enum class RobotActivityState {
     LISTENING,
     THINKING,
     SPEAKING,
+    PROACTIVE_SPEAKING,
     SLEEPING,
     OBSERVING,
     ACTING,
@@ -20,6 +21,7 @@ internal data class RobotConsentState(
     val cameraPermissionGranted: Boolean = false,
     val cameraObservationEnabled: Boolean = false,
     val persistentMemoryEnabled: Boolean = false,
+    val autonomyEnabled: Boolean = false,
     val autonomousSpeechEnabled: Boolean = false,
     val quietHoursActive: Boolean = false
 )
@@ -40,12 +42,16 @@ internal sealed interface RobotEvent {
     data class CameraPermissionChanged(val granted: Boolean) : RobotEvent
     data class CameraConsentChanged(val enabled: Boolean) : RobotEvent
     data class PersistentMemoryConsentChanged(val enabled: Boolean) : RobotEvent
+    data class AutonomyEnabledChanged(val enabled: Boolean) : RobotEvent
     data class AutonomousSpeechConsentChanged(val enabled: Boolean) : RobotEvent
     data class QuietHoursChanged(val active: Boolean) : RobotEvent
     data class RecordingCompleted(val sessionId: Long) : RobotEvent
     data class TranscriptReady(val sessionId: Long, val hasText: Boolean) : RobotEvent
     data class ConversationReady(val sessionId: Long, val hasReply: Boolean) : RobotEvent
     data class SpeechCompleted(val sessionId: Long) : RobotEvent
+    data object ProactiveReminderStarted : RobotEvent
+    data class ProactiveReminderFinished(val sessionId: Long) : RobotEvent
+    data class ProactiveReminderFailed(val sessionId: Long) : RobotEvent
     data class SessionFailed(val sessionId: Long, val message: String) : RobotEvent
     data class ErrorDismissed(val sessionId: Long) : RobotEvent
     data object SleepRequested : RobotEvent
@@ -156,6 +162,11 @@ internal class RobotCore(
             emptyList()
         }
 
+        is RobotEvent.AutonomyEnabledChanged -> {
+            snapshot = snapshot.copy(consent = snapshot.consent.copy(autonomyEnabled = event.enabled))
+            emptyList()
+        }
+
         is RobotEvent.AutonomousSpeechConsentChanged -> {
             snapshot = snapshot.copy(
                 consent = snapshot.consent.copy(autonomousSpeechEnabled = event.enabled)
@@ -203,6 +214,34 @@ internal class RobotCore(
 
         is RobotEvent.SpeechCompleted -> {
             if (isCurrent(event.sessionId, RobotActivityState.SPEAKING)) {
+                snapshot = snapshot.copy(activity = RobotActivityState.IDLE, errorMessage = null)
+            }
+            emptyList()
+        }
+
+        RobotEvent.ProactiveReminderStarted -> {
+            val consent = snapshot.consent
+            if (hostResumed && snapshot.activity == RobotActivityState.IDLE && consent.autonomyEnabled &&
+                consent.autonomousSpeechEnabled && !consent.quietHoursActive
+            ) {
+                snapshot = snapshot.copy(
+                    activity = RobotActivityState.PROACTIVE_SPEAKING,
+                    sessionId = snapshot.sessionId + 1L,
+                    errorMessage = null
+                )
+            }
+            emptyList()
+        }
+
+        is RobotEvent.ProactiveReminderFinished -> {
+            if (isCurrent(event.sessionId, RobotActivityState.PROACTIVE_SPEAKING)) {
+                snapshot = snapshot.copy(activity = RobotActivityState.IDLE, errorMessage = null)
+            }
+            emptyList()
+        }
+
+        is RobotEvent.ProactiveReminderFailed -> {
+            if (isCurrent(event.sessionId, RobotActivityState.PROACTIVE_SPEAKING)) {
                 snapshot = snapshot.copy(activity = RobotActivityState.IDLE, errorMessage = null)
             }
             emptyList()
@@ -337,7 +376,8 @@ internal class RobotCore(
         val VOICE_STATES = setOf(
             RobotActivityState.LISTENING,
             RobotActivityState.THINKING,
-            RobotActivityState.SPEAKING
+            RobotActivityState.SPEAKING,
+            RobotActivityState.PROACTIVE_SPEAKING
         )
     }
 }

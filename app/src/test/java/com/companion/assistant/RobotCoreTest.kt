@@ -82,6 +82,34 @@ class RobotCoreTest {
     }
 
     @Test
+    fun proactiveReminderRequiresAutonomySpeechConsentQuietHoursToBeOverAndIdleCore() {
+        val core = readyCoreWithMicrophone()
+        core.dispatch(RobotEvent.AutonomyEnabledChanged(true))
+        core.dispatch(RobotEvent.AutonomousSpeechConsentChanged(true))
+        core.dispatch(RobotEvent.QuietHoursChanged(false))
+
+        core.dispatch(RobotEvent.ProactiveReminderStarted)
+        assertEquals(RobotActivityState.PROACTIVE_SPEAKING, core.snapshot.activity)
+        val session = core.snapshot.sessionId
+        core.dispatch(RobotEvent.ProactiveReminderFinished(session))
+        assertEquals(RobotActivityState.IDLE, core.snapshot.activity)
+
+        core.dispatch(RobotEvent.QuietHoursChanged(true))
+        core.dispatch(RobotEvent.ProactiveReminderStarted)
+        assertEquals(RobotActivityState.IDLE, core.snapshot.activity)
+        core.dispatch(RobotEvent.QuietHoursChanged(false))
+        core.dispatch(RobotEvent.AutonomyEnabledChanged(false))
+        core.dispatch(RobotEvent.ProactiveReminderStarted)
+        assertEquals(RobotActivityState.IDLE, core.snapshot.activity)
+
+        core.dispatch(RobotEvent.AutonomyEnabledChanged(true))
+        val voiceSession = core.dispatch(RobotEvent.FaceTapped).single() as RobotEffect.StartListening
+        core.dispatch(RobotEvent.ProactiveReminderStarted)
+        assertEquals(RobotActivityState.LISTENING, core.snapshot.activity)
+        assertEquals(voiceSession.sessionId, core.snapshot.sessionId)
+    }
+
+    @Test
     fun emptyPlatformTranscriptShowsRecoverableError() {
         val core = readyCoreWithMicrophone()
         val start = core.dispatch(RobotEvent.FaceTapped).single() as RobotEffect.StartListening

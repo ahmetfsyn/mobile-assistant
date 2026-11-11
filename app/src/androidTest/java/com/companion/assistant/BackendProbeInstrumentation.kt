@@ -9,6 +9,7 @@ class BackendProbeInstrumentation : Instrumentation() {
     private var runConversation = false
     private var conversationBatch = false
     private var securityStoreProbe = false
+    private var reminderStoreProbe = false
     private var endpointOverride: String? = null
 
     override fun onCreate(arguments: Bundle?) {
@@ -16,6 +17,7 @@ class BackendProbeInstrumentation : Instrumentation() {
         runConversation = arguments?.getString("conversation") == "true"
         conversationBatch = arguments?.getString("conversationBatch") == "true"
         securityStoreProbe = arguments?.getString("securityStore") == "true"
+        reminderStoreProbe = arguments?.getString("reminderStore") == "true"
         endpointOverride = arguments?.getString("endpoint")?.trim()?.takeIf(String::isNotEmpty)
         start()
     }
@@ -28,6 +30,15 @@ class BackendProbeInstrumentation : Instrumentation() {
                 stage = "security_store"
                 runSecurityStoreProbe()
                 results.putString("securityStore", "ok")
+                results.putString("result", "ok")
+                finish(0, results)
+                return
+            }
+
+            if (reminderStoreProbe) {
+                stage = "reminder_store"
+                runReminderStoreProbe()
+                results.putString("reminderStore", "ok")
                 results.putString("result", "ok")
                 finish(0, results)
                 return
@@ -96,6 +107,24 @@ class BackendProbeInstrumentation : Instrumentation() {
             if (previousToken.isEmpty()) tokenStore.clearAccessToken()
             else check(tokenStore.saveAccessToken(previousToken)) { "Could not restore the existing access token." }
             consentStore.setEnabled(previousConsent)
+        }
+    }
+
+    private fun runReminderStoreProbe() {
+        val store = ReminderStore(targetContext)
+        var reminderId: String? = null
+        try {
+            val created = store.create("Instrumentasyon geçici hatırlatması", System.currentTimeMillis() + 60_000L, "none")
+            reminderId = created.id
+            check(store.get(created.id)?.status == "scheduled") { "Reminder was not persisted." }
+            val updated = store.update(created.id, "Düzenlenmiş geçici hatırlatma", System.currentTimeMillis() + 120_000L, "daily")
+            check(updated?.recurrence == "daily") { "Reminder update was not persisted." }
+            check(store.pause(created.id)?.status == "paused") { "Reminder did not pause." }
+            check(store.resume(created.id)?.status == "scheduled") { "Reminder did not resume." }
+            check(store.complete(created.id)?.status == "completed") { "Reminder did not complete." }
+        } finally {
+            reminderId?.let(store::delete)
+            store.close()
         }
     }
 }

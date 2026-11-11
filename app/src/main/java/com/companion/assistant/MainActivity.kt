@@ -3,6 +3,10 @@ package com.companion.assistant
 import android.Manifest
 import android.app.AlertDialog
 import android.app.Activity
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Build
@@ -33,11 +37,23 @@ class MainActivity : Activity() {
     private var securityDialog: AlertDialog? = null
     private var memoryDialog: AlertDialog? = null
     private var memoryApiClient: MemoryApiClient? = null
+    private var reminderStore: ReminderStore? = null
+    private var reminderSettingsStore: ReminderSettingsStore? = null
+    private var reminderScheduler: ReminderScheduler? = null
+    private var reminderApiClient: ReminderApiClient? = null
+    private var reminderManagerDialog: ReminderManagerDialog? = null
+    private var reminderReceiverRegistered = false
+    private val reminderSyncExecutor: ExecutorService = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "companion-reminder-sync").apply { isDaemon = true }
+    }
     private val memoryExecutor: ExecutorService = Executors.newSingleThreadExecutor { task ->
         Thread(task, "companion-memory-io").apply { isDaemon = true }
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val reminderDueReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) = handleReminderDue(intent)
+    }
     private val dismissRobotError = Runnable {
         val snapshot = robotCore?.snapshot ?: return@Runnable
         if (snapshot.activity == RobotActivityState.ERROR) {
@@ -60,7 +76,27 @@ class MainActivity : Activity() {
         val consentStore = MemoryConsentStore(applicationContext)
         memoryConsentStore = consentStore
         memoryApiClient = MemoryApiClient(BuildConfig.COMPANION_BACKEND_URL, tokenStore::accessToken)
+        val reminders = ReminderStore(applicationContext)
+        val reminderSettings = ReminderSettingsStore(applicationContext)
+        val scheduler = ReminderScheduler(applicationContext, reminders)
+        val reminderApi = ReminderApiClient(BuildConfig.COMPANION_BACKEND_URL, tokenStore::accessToken)
+        reminderStore = reminders
+        reminderSettingsStore = reminderSettings
+        reminderScheduler = scheduler
+        reminderApiClient = reminderApi
         core.dispatch(RobotEvent.PersistentMemoryConsentChanged(consentStore.isEnabled()))
+        applyReminderSettingsToRobot(reminderSettings.get())
+        val reminderCommands = ReminderCommandProcessor(
+            reminders, reminderSettings, scheduler,
+            onSettingsChanged = { settings ->
+                mainHandler.post {
+                    applyReminderSettingsToRobot(settings)
+                    syncReminderSettings(settings)
+                }
+            },
+            syncReminder = ::syncReminderRecord,
+            syncDelete = ::syncReminderDeletion
+        )
         val speechInput = SpeechInputFactory.create(applicationContext)
         voiceController = VoiceInteractionController(
             robotCore = core,
@@ -75,7 +111,8 @@ class MainActivity : Activity() {
             conversationHistory = SharedPreferencesConversationHistoryStore(applicationContext),
             onCaptionChanged = face::setCaption,
             onFaceCueChanged = face::setEmotionCue,
-            onAuthenticationRequired = { showSecuritySettings(authenticationRequired = true) }
+            onAuthenticationRequired = { showSecuritySettings(authenticationRequired = true) },
+            reminderCommandProcessor = reminderCommands
         )
         face.setOnFaceTapListener { onFaceTapped() }
         face.setOnSettingsTapListener { showSecuritySettings(authenticationRequired = false) }
@@ -87,10 +124,15 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         applyImmersiveFullscreen()
+        ReminderHost.isVisible = true
+        registerReminderReceiver()
         dispatchRobotEvent(RobotEvent.HostResumed)
         if (!microphonePermissionRequestPending) {
             dispatchRobotEvent(RobotEvent.MicrophonePermissionChanged(hasMicrophonePermission()))
         }
+        reminderSettingsStore?.get()?.let(::applyReminderSettingsToRobot)
+        reminderStore?.recoverDue()?.forEach { reminderScheduler?.schedule(it) }
+        reminderScheduler?.scheduleAll()
         faceView?.start()
     }
 
@@ -100,6 +142,8 @@ class MainActivity : Activity() {
     }
 
     override fun onPause() {
+        ReminderHost.isVisible = false
+        unregisterReminderReceiver()
         dispatchRobotEvent(RobotEvent.HostPaused)
         faceView?.stop()
         super.onPause()
@@ -126,12 +170,20 @@ class MainActivity : Activity() {
         securityDialog = null
         memoryDialog?.dismiss()
         memoryDialog = null
+        reminderManagerDialog?.dismiss()
+        reminderManagerDialog = null
         dispatchRobotEvent(RobotEvent.CloseRequested)
         voiceController?.close()
         voiceController = null
         memoryApiClient?.cancelRequests()
         memoryExecutor.shutdownNow()
+        reminderSyncExecutor.shutdownNow()
+        reminderStore?.close()
         memoryApiClient = null
+        reminderApiClient = null
+        reminderScheduler = null
+        reminderStore = null
+        reminderSettingsStore = null
         mainHandler.removeCallbacksAndMessages(null)
         robotCore = null
         faceView?.destroy()
@@ -192,15 +244,24 @@ class MainActivity : Activity() {
                 showMemoryManagement()
             }
         }
+        val autonomyManager = Button(this).apply {
+            text = "OTONOMİ VE HATIRLATICILAR"
+            contentDescription = "Hatırlatmaları ve sessiz saatleri yönet"
+            setOnClickListener {
+                securityDialog?.dismiss()
+                showReminderManagement()
+            }
+        }
         content.addView(details)
         content.addView(tokenInput)
         content.addView(memoryConsent)
         content.addView(memoryDetails)
         content.addView(memoryManager)
+        content.addView(autonomyManager)
 
         val dialog = AlertDialog.Builder(this)
             .setTitle("GÜVENLİK VE GİZLİLİK")
-            .setView(content)
+            .setView(ScrollView(this).apply { addView(content) })
             .setPositiveButton("KAYDET", null)
             .setNeutralButton("ANAHTARI SİL", null)
             .setNegativeButton("KAPAT", null)
@@ -237,6 +298,147 @@ class MainActivity : Activity() {
                     View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
         }
         dialog.show()
+    }
+
+    private fun showReminderManagement() {
+        val store = reminderStore ?: return
+        val settings = reminderSettingsStore ?: return
+        val scheduler = reminderScheduler ?: return
+        val manager = ReminderManagerDialog(
+            activity = this,
+            store = store,
+            settingsStore = settings,
+            scheduler = scheduler,
+            onSettingsChanged = ::applyReminderSettings,
+            syncReminder = ::syncReminderRecord,
+            syncDelete = ::syncReminderDeletion
+        )
+        reminderManagerDialog = manager
+        manager.show()
+    }
+
+    private fun applyReminderSettings(settings: ReminderSettings) {
+        reminderSettingsStore?.save(settings)
+        applyReminderSettingsToRobot(settings)
+        reminderScheduler?.scheduleAll()
+        syncReminderSettings(settings)
+    }
+
+    private fun applyReminderSettingsToRobot(settings: ReminderSettings) {
+        dispatchRobotEvent(RobotEvent.AutonomyEnabledChanged(settings.autonomyEnabled))
+        dispatchRobotEvent(RobotEvent.AutonomousSpeechConsentChanged(settings.proactiveSpeechEnabled))
+        dispatchRobotEvent(RobotEvent.QuietHoursChanged(
+            ReminderTimePolicy.isQuiet(System.currentTimeMillis(), settings, java.util.TimeZone.getDefault().id)
+        ))
+    }
+
+    private fun syncReminderSettings(settings: ReminderSettings) {
+        reminderSyncExecutor.execute {
+            try { reminderApiClient?.syncSettings(settings) }
+            catch (_: Exception) { android.util.Log.w("ReminderSync", "settings_sync_failed") }
+        }
+    }
+
+    private fun syncReminderRecord(reminder: ReminderRecord, isNew: Boolean) {
+        reminderSyncExecutor.execute {
+            try {
+                val api = reminderApiClient ?: return@execute
+                if (isNew) api.create(reminder) else api.update(reminder)
+            } catch (_: Exception) {
+                android.util.Log.w("ReminderSync", "reminder_sync_failed id=${reminder.id}")
+            }
+        }
+    }
+
+    private fun syncReminderDeletion(id: String) {
+        reminderSyncExecutor.execute {
+            try { reminderApiClient?.delete(id) }
+            catch (_: Exception) { android.util.Log.w("ReminderSync", "reminder_delete_sync_failed id=$id") }
+        }
+    }
+
+    private fun registerReminderReceiver() {
+        if (reminderReceiverRegistered) return
+        registerReceiver(reminderDueReceiver, IntentFilter(ReminderScheduler.ACTION_REMINDER_DUE))
+        reminderReceiverRegistered = true
+    }
+
+    private fun unregisterReminderReceiver() {
+        if (!reminderReceiverRegistered) return
+        try { unregisterReceiver(reminderDueReceiver) } catch (_: IllegalArgumentException) { }
+        reminderReceiverRegistered = false
+    }
+
+    private fun handleReminderDue(intent: Intent) {
+        val id = intent.getStringExtra(ReminderScheduler.EXTRA_REMINDER_ID) ?: return
+        val expectedAt = intent.getLongExtra(ReminderScheduler.EXTRA_EXPECTED_AT, -1L)
+        if (expectedAt <= 0L) return
+        val store = reminderStore ?: return
+        val scheduler = reminderScheduler ?: return
+        val settings = reminderSettingsStore?.get() ?: return
+        val reminder = store.get(id) ?: return
+        if (reminder.pendingAtMillis != expectedAt || reminder.status != "scheduled") return
+        if (!settings.autonomyEnabled) return
+        val now = System.currentTimeMillis()
+        val zoneId = java.util.TimeZone.getDefault().id
+        if (ReminderTimePolicy.isQuiet(now, settings, zoneId)) {
+            ReminderNotifications.cancel(this, id)
+            scheduler.deferForQuietHours(id, expectedAt, settings, zoneId)
+            return
+        }
+        applyReminderSettingsToRobot(settings)
+        val core = robotCore
+        if (core?.snapshot?.activity != RobotActivityState.IDLE) {
+            ReminderNotifications.cancel(this, id)
+            scheduler.defer(id, expectedAt, now + ReminderScheduler.RETRY_DELAY_MS, failedAttempt = false)
+            return
+        }
+        if (!settings.proactiveSpeechEnabled) {
+            if (ReminderNotifications.post(this, reminder)) {
+                store.markDelivered(id, expectedAt, now)
+                scheduler.scheduleAll()
+                syncReminderState(store.get(id))
+            } else {
+                scheduler.defer(id, expectedAt, now + ReminderScheduler.RETRY_DELAY_MS, failedAttempt = true)
+            }
+            return
+        }
+        val cooldown = ReminderCooldownStore(applicationContext)
+        val nextAllowed = cooldown.nextAllowedAt(now)
+        if (nextAllowed > now) {
+            ReminderNotifications.cancel(this, id)
+            scheduler.defer(id, expectedAt, nextAllowed, failedAttempt = false)
+            return
+        }
+        val started = voiceController
+        if (started == null) {
+            scheduler.defer(id, expectedAt, now + ReminderScheduler.RETRY_DELAY_MS, failedAttempt = false)
+            return
+        }
+        ReminderNotifications.cancel(this, id)
+        started.speakProactiveReminder(reminder.message) { spoke ->
+            val finishedAt = System.currentTimeMillis()
+            if (spoke) {
+                store.markDelivered(id, expectedAt, finishedAt)
+                cooldown.markSpoken(finishedAt)
+                scheduler.scheduleAll()
+                syncReminderState(store.get(id))
+            } else {
+                scheduler.defer(id, expectedAt, finishedAt + ReminderScheduler.RETRY_DELAY_MS, failedAttempt = true)
+                val afterFailure = store.get(id)
+                if (afterFailure?.status == "needs_attention") {
+                    if (ReminderNotifications.post(this, afterFailure)) {
+                        store.markDelivered(id, expectedAt, finishedAt)
+                        scheduler.scheduleAll()
+                        syncReminderState(store.get(id))
+                    }
+                }
+            }
+        }
+    }
+
+    private fun syncReminderState(reminder: ReminderRecord?) {
+        reminder?.let { syncReminderRecord(it, isNew = false) }
     }
 
     private fun showMemoryManagement() {
@@ -483,6 +685,7 @@ class MainActivity : Activity() {
 
             RobotActivityState.THINKING -> faceView?.showVoiceProcessing()
             RobotActivityState.SPEAKING -> faceView?.showVoiceSpeaking()
+            RobotActivityState.PROACTIVE_SPEAKING -> faceView?.showVoiceSpeaking()
             RobotActivityState.ERROR -> {
                 faceView?.setCaption(null)
                 faceView?.showVoiceError(current.errorMessage ?: "KONUŞMA TAMAMLANAMADI")
@@ -533,6 +736,7 @@ class MainActivity : Activity() {
             RobotActivityState.LISTENING,
             RobotActivityState.THINKING,
             RobotActivityState.SPEAKING,
+            RobotActivityState.PROACTIVE_SPEAKING,
             RobotActivityState.ERROR
         )
     }

@@ -3,7 +3,6 @@ import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 
-const SCHEMA_VERSION = 1;
 const MAX_ACTIVE_MEMORIES = 1_000;
 const MAX_SEARCH_CANDIDATES = 500;
 
@@ -39,6 +38,24 @@ function rowToMemory(row) {
     lastAccessedAt: row.last_accessed_at,
     sourceRef: row.source_ref,
     status: row.status
+  };
+}
+
+function reminderFromRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    message: row.message,
+    scheduledAt: row.scheduled_at,
+    timeZone: row.time_zone,
+    recurrence: row.recurrence,
+    enabled: row.enabled === 1,
+    status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    lastDeliveredAt: row.last_delivered_at,
+    nextScheduledAt: row.next_scheduled_at,
+    deliveryAttempts: row.delivery_attempts
   };
 }
 
@@ -93,11 +110,13 @@ export class MemoryRepository {
 
   migrate() {
     this.database.exec("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)");
-    const applied = this.database.prepare("SELECT 1 FROM schema_migrations WHERE version = ?").get(SCHEMA_VERSION);
-    if (applied) return;
+    const hasMigration = (version) => Boolean(
+      this.database.prepare("SELECT 1 FROM schema_migrations WHERE version = ?").get(version)
+    );
 
-    const migration = this.database.transaction(() => {
-      this.database.exec(`
+    if (!hasMigration(1)) {
+      const migration = this.database.transaction(() => {
+        this.database.exec(`
         CREATE TABLE memories (
           id TEXT PRIMARY KEY,
           category TEXT NOT NULL CHECK (category IN ('profile', 'preference', 'fact', 'routine', 'summary')),
@@ -116,11 +135,119 @@ export class MemoryRepository {
           ON memories(category, normalized_key) WHERE status = 'active';
         CREATE INDEX memories_active_updated
           ON memories(status, updated_at DESC);
-      `);
-      this.database.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
-        .run(SCHEMA_VERSION, new Date().toISOString());
+        `);
+        this.database.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+          .run(1, new Date().toISOString());
+      });
+      migration();
+    }
+
+    if (!hasMigration(2)) {
+      const migration = this.database.transaction(() => {
+        this.database.exec(`
+          CREATE TABLE reminders (
+            id TEXT PRIMARY KEY,
+            message TEXT NOT NULL CHECK (length(message) BETWEEN 1 AND 240),
+            scheduled_at TEXT NOT NULL,
+            time_zone TEXT NOT NULL,
+            recurrence TEXT NOT NULL CHECK (recurrence IN ('none', 'daily', 'weekdays', 'weekly:MO', 'weekly:TU', 'weekly:WE', 'weekly:TH', 'weekly:FR', 'weekly:SA', 'weekly:SU')),
+            enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+            status TEXT NOT NULL CHECK (status IN ('scheduled', 'paused', 'completed', 'deleted')),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            last_delivered_at TEXT,
+            next_scheduled_at TEXT NOT NULL,
+            delivery_attempts INTEGER NOT NULL DEFAULT 0 CHECK (delivery_attempts BETWEEN 0 AND 3)
+          );
+          CREATE INDEX reminders_due ON reminders(status, enabled, next_scheduled_at);
+          CREATE TABLE companion_settings (
+            singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+            settings_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          );
+        `);
+        this.database.prepare("INSERT INTO companion_settings(singleton_id, settings_json, updated_at) VALUES (1, ?, ?)")
+          .run(JSON.stringify({ autonomyEnabled: false, proactiveSpeechEnabled: false, quietHoursEnabled: true, quietHoursStart: "23:00", quietHoursEnd: "08:00" }), new Date().toISOString());
+        this.database.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+          .run(2, new Date().toISOString());
+      });
+      migration();
+    }
+  }
+
+  createReminder(input) {
+    if (input.id) {
+      const existing = this.database.prepare("SELECT * FROM reminders WHERE id = ?").get(input.id);
+      if (existing) return reminderFromRow(existing);
+    }
+    const now = new Date().toISOString();
+    const reminder = {
+      id: input.id ?? randomUUID(),
+      message: input.message,
+      scheduledAt: input.scheduledAt,
+      timeZone: input.timeZone,
+      recurrence: input.recurrence ?? "none",
+      enabled: input.status ? input.status === "scheduled" : input.enabled !== false,
+      status: input.status ?? (input.enabled === false ? "paused" : "scheduled"),
+      createdAt: now,
+      updatedAt: now,
+      lastDeliveredAt: input.lastDeliveredAt ?? null,
+      nextScheduledAt: input.nextScheduledAt ?? input.scheduledAt,
+      deliveryAttempts: 0
+    };
+    this.database.prepare(`INSERT INTO reminders(id, message, scheduled_at, time_zone, recurrence, enabled, status,
+      created_at, updated_at, last_delivered_at, next_scheduled_at, delivery_attempts)
+      VALUES (@id, @message, @scheduledAt, @timeZone, @recurrence, @enabled, @status, @createdAt, @updatedAt,
+      @lastDeliveredAt, @nextScheduledAt, @deliveryAttempts)`).run({ ...reminder, enabled: reminder.enabled ? 1 : 0 });
+    return reminder;
+  }
+
+  listReminders({ includeDeleted = false } = {}) {
+    const rows = this.database.prepare(`SELECT * FROM reminders ${includeDeleted ? "" : "WHERE status != 'deleted'"}
+      ORDER BY next_scheduled_at ASC LIMIT 100`).all();
+    return rows.map(reminderFromRow);
+  }
+
+  getReminder(id) {
+    return reminderFromRow(this.database.prepare("SELECT * FROM reminders WHERE id = ? AND status != 'deleted'").get(id));
+  }
+
+  updateReminder(id, changes) {
+    const existing = this.getReminder(id);
+    if (!existing) return null;
+    const updated = { ...existing, ...changes, updatedAt: new Date().toISOString() };
+    if (changes.scheduledAt !== undefined && changes.nextScheduledAt === undefined) {
+      updated.nextScheduledAt = changes.scheduledAt;
+    }
+    if (updated.status === "paused" || updated.status === "completed" || updated.status === "deleted") updated.enabled = false;
+    else if (changes.status === "scheduled") updated.enabled = true;
+    this.database.prepare(`UPDATE reminders SET message = @message, scheduled_at = @scheduledAt, time_zone = @timeZone,
+      recurrence = @recurrence, enabled = @enabled, status = @status, updated_at = @updatedAt,
+      last_delivered_at = @lastDeliveredAt, next_scheduled_at = @nextScheduledAt,
+      delivery_attempts = @deliveryAttempts WHERE id = @id`).run({
+      ...updated,
+      enabled: updated.enabled ? 1 : 0
     });
-    migration();
+    return updated;
+  }
+
+  deleteReminder(id) {
+    return Boolean(this.updateReminder(id, { status: "deleted", enabled: false }));
+  }
+
+  getSettings() {
+    const row = this.database.prepare("SELECT settings_json, updated_at FROM companion_settings WHERE singleton_id = 1").get();
+    return { ...JSON.parse(row.settings_json), updatedAt: row.updated_at };
+  }
+
+  updateSettings(settings) {
+    const existing = this.getSettings();
+    const updated = { ...existing, ...settings };
+    delete updated.updatedAt;
+    const updatedAt = new Date().toISOString();
+    this.database.prepare("UPDATE companion_settings SET settings_json = ?, updated_at = ? WHERE singleton_id = 1")
+      .run(JSON.stringify(updated), updatedAt);
+    return { ...updated, updatedAt };
   }
 
   prepareStatements() {

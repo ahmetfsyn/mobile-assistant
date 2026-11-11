@@ -16,6 +16,7 @@ const MAX_MESSAGE_CHARS = 1_800;
 const MAX_REPLY_CHARS = 900;
 const RATE_WINDOW_MS = 60_000;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const REMINDER_RECURRENCES = new Set(["none", "daily", "weekdays", "weekly:MO", "weekly:TU", "weekly:WE", "weekly:TH", "weekly:FR", "weekly:SA", "weekly:SU"]);
 
 export function conversationFingerprint(interactionId, message) {
   return createHash("sha256").update(`${interactionId}\0${message}`).digest("hex").slice(0, 16);
@@ -135,6 +136,91 @@ function validateConversationBody(value) {
   };
 }
 
+function validateReminder(value, { partial = false } = {}) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ApiError("invalid_reminder", 400, "A reminder JSON object is required.");
+  }
+  const result = {};
+  if (value.id !== undefined) {
+    if (!UUID_PATTERN.test(value.id)) throw new ApiError("invalid_reminder_id", 400, "id must be a UUID.");
+    result.id = value.id.toLowerCase();
+  }
+  if (!partial || value.message !== undefined) {
+    if (typeof value.message !== "string" || !value.message.trim() || value.message.trim().length > 240) {
+      throw new ApiError("invalid_reminder_message", 400, "message must contain between 1 and 240 characters.");
+    }
+    result.message = value.message.trim();
+  }
+  if (!partial || value.scheduledAt !== undefined) {
+    if (typeof value.scheduledAt !== "string" || !Number.isFinite(Date.parse(value.scheduledAt))) {
+      throw new ApiError("invalid_reminder_time", 400, "scheduledAt must be a valid ISO date-time.");
+    }
+    result.scheduledAt = new Date(value.scheduledAt).toISOString();
+  }
+  if (value.nextScheduledAt !== undefined) {
+    if (typeof value.nextScheduledAt !== "string" || !Number.isFinite(Date.parse(value.nextScheduledAt))) {
+      throw new ApiError("invalid_reminder_time", 400, "nextScheduledAt must be a valid ISO date-time.");
+    }
+    result.nextScheduledAt = new Date(value.nextScheduledAt).toISOString();
+  }
+  if (value.lastDeliveredAt !== undefined) {
+    if (value.lastDeliveredAt !== null && (typeof value.lastDeliveredAt !== "string" || !Number.isFinite(Date.parse(value.lastDeliveredAt)))) {
+      throw new ApiError("invalid_reminder_time", 400, "lastDeliveredAt must be null or a valid ISO date-time.");
+    }
+    result.lastDeliveredAt = value.lastDeliveredAt === null ? null : new Date(value.lastDeliveredAt).toISOString();
+  }
+  if (!partial || value.timeZone !== undefined) {
+    if (typeof value.timeZone !== "string" || value.timeZone.length > 80) {
+      throw new ApiError("invalid_reminder_timezone", 400, "timeZone must be a valid IANA time zone.");
+    }
+    try { new Intl.DateTimeFormat("en-US", { timeZone: value.timeZone }); }
+    catch { throw new ApiError("invalid_reminder_timezone", 400, "timeZone must be a valid IANA time zone."); }
+    result.timeZone = value.timeZone;
+  }
+  if (value.recurrence !== undefined || !partial) {
+    const recurrence = value.recurrence ?? "none";
+    if (typeof recurrence !== "string" || !REMINDER_RECURRENCES.has(recurrence)) {
+      throw new ApiError("invalid_reminder_recurrence", 400, "recurrence is not supported.");
+    }
+    result.recurrence = recurrence;
+  }
+  if (value.enabled !== undefined) {
+    if (typeof value.enabled !== "boolean") throw new ApiError("invalid_reminder_status", 400, "enabled must be a boolean.");
+    result.enabled = value.enabled;
+    result.status = value.enabled ? "scheduled" : "paused";
+  }
+  if (value.status !== undefined) {
+    if (!["scheduled", "paused", "completed"].includes(value.status)) {
+      throw new ApiError("invalid_reminder_status", 400, "status must be scheduled, paused, or completed.");
+    }
+    result.status = value.status;
+    result.enabled = value.status === "scheduled";
+  }
+  return result;
+}
+
+function validateAutonomySettings(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ApiError("invalid_autonomy_settings", 400, "A settings JSON object is required.");
+  }
+  const result = {};
+  for (const key of ["autonomyEnabled", "proactiveSpeechEnabled", "quietHoursEnabled"]) {
+    if (value[key] !== undefined) {
+      if (typeof value[key] !== "boolean") throw new ApiError("invalid_autonomy_settings", 400, `${key} must be a boolean.`);
+      result[key] = value[key];
+    }
+  }
+  for (const key of ["quietHoursStart", "quietHoursEnd"]) {
+    if (value[key] !== undefined) {
+      if (typeof value[key] !== "string" || !/^([01]\d|2[0-3]):[0-5]\d$/u.test(value[key])) {
+        throw new ApiError("invalid_autonomy_settings", 400, `${key} must use HH:mm format.`);
+      }
+      result[key] = value[key];
+    }
+  }
+  return result;
+}
+
 function trimReply(value) {
   const trimmed = value.trim();
   if (trimmed.length <= MAX_REPLY_CHARS) return trimmed;
@@ -247,9 +333,14 @@ export function createConversationServer({
     const isMemoryRequest = isMemoryStatus || isMemoryCollection || isMemoryItem;
     const isConfigRequest = request.method === "GET" && pathname === "/v1/config";
     const isConversationRequest = request.method === "POST" && pathname === "/v1/conversations";
+    const reminderItemMatch = /^\/v1\/reminders\/([0-9a-f-]{36})$/iu.exec(pathname);
+    const isReminderCollection = pathname === "/v1/reminders" && ["GET", "POST"].includes(request.method);
+    const isReminderItem = reminderItemMatch !== null && ["PATCH", "DELETE"].includes(request.method);
+    const isAutonomyRequest = pathname === "/v1/autonomy" && ["GET", "PUT"].includes(request.method);
+    const isReminderRequest = isReminderCollection || isReminderItem || isAutonomyRequest;
     const route = isConversationRequest ? "conversation"
       : isConfigRequest ? "config"
-        : isMemoryRequest ? "memory" : pathname === "/healthz" ? "health" : "other";
+        : isMemoryRequest ? "memory" : isReminderRequest ? "reminders" : pathname === "/healthz" ? "health" : "other";
     if (route !== "health") {
       const startedAt = Date.now();
       requestLogger({ event: "request_received", interactionId, requestId, route, method: request.method });
@@ -285,7 +376,7 @@ export function createConversationServer({
       return;
     }
 
-    if (!isConfigRequest && !isConversationRequest && !isMemoryRequest) {
+    if (!isConfigRequest && !isConversationRequest && !isMemoryRequest && !isReminderRequest) {
       sendError(response, new ApiError("not_found", 404, "The requested endpoint does not exist."));
       return;
     }
@@ -297,7 +388,7 @@ export function createConversationServer({
     }
 
     if (!hasValidCompanionToken(request, config.companionAccessToken)) {
-      requestLogger({ event: "companion_auth_rejected", interactionId, requestId, route: isConfigRequest ? "config" : "conversation" });
+      requestLogger({ event: "companion_auth_rejected", interactionId, requestId, route });
       sendError(response, new ApiError("companion_auth_required", 401, "A valid companion access token is required."));
       return;
     }
@@ -314,6 +405,51 @@ export function createConversationServer({
         language: "tr-TR",
         maxHistoryMessages: MAX_HISTORY_MESSAGES
       });
+      return;
+    }
+
+    if (isReminderRequest) {
+      try {
+        if (!memoryRepository) throw new ApiError("reminder_store_unavailable", 503, "The local reminder store is unavailable.");
+        if (isAutonomyRequest && request.method === "GET") {
+          sendJson(response, 200, { settings: memoryRepository.getSettings() });
+          return;
+        }
+        if (isAutonomyRequest && request.method === "PUT") {
+          const settings = memoryRepository.updateSettings(validateAutonomySettings(await readJsonBody(request)));
+          sendJson(response, 200, { settings });
+          return;
+        }
+        if (isReminderCollection && request.method === "GET") {
+          sendJson(response, 200, { reminders: memoryRepository.listReminders() });
+          return;
+        }
+        if (isReminderCollection && request.method === "POST") {
+          const body = validateReminder(await readJsonBody(request));
+          const reminder = memoryRepository.createReminder(body);
+          sendJson(response, 201, { reminder });
+          return;
+        }
+        if (isReminderItem && request.method === "PATCH") {
+          const changes = validateReminder(await readJsonBody(request), { partial: true });
+          const reminder = memoryRepository.updateReminder(reminderItemMatch[1], changes);
+          if (!reminder) throw new ApiError("reminder_not_found", 404, "The requested reminder does not exist.");
+          sendJson(response, 200, { reminder });
+          return;
+        }
+        if (isReminderItem && request.method === "DELETE") {
+          const deleted = memoryRepository.deleteReminder(reminderItemMatch[1]);
+          if (!deleted) throw new ApiError("reminder_not_found", 404, "The requested reminder does not exist.");
+          sendJson(response, 200, { deleted: true });
+          return;
+        }
+      } catch (error) {
+        if (error instanceof ApiError) sendError(response, error);
+        else {
+          requestLogger({ event: "reminder_store_request_failed", requestId, interactionId, errorType: error?.constructor?.name ?? "Error" });
+          sendError(response, new ApiError("reminder_store_unavailable", 503, "The local reminder store could not complete the request."));
+        }
+      }
       return;
     }
 

@@ -1,10 +1,10 @@
 # Robot System Architecture
 
-Status: architecture proposal with **Phase 1 foundation and the initial Phase 5 memory milestone implemented**. Android has a synchronous `RobotCore` reducer, typed events/effects, activity snapshots, microphone permission and consent fields, session generation, lifecycle cancellation, and a memory manager. The backend has a consent-gated SQLite repository and bounded retrieval. Per-device identity, encrypted local storage/transport, automatic summaries, camera, autonomous actions, tools, and hardware behavior remain future work. See [vision](ROBOT_VISION.md), [technology choices](ROBOT_TECH_STACK.md), [roadmap](ROBOT_ROADMAP.md), [hardware plan](ROBOT_HARDWARE_PLAN.md), and [decisions](ROBOT_DECISIONS.md).
+Status: Phase 1, the initial Phase 5 memory milestone, and an initial Phase 6 reminder foundation are implemented. Android has a synchronous `RobotCore` reducer, typed events/effects, activity snapshots, microphone/consent fields, session generation, lifecycle cancellation, memory management, and controlled reminder delivery. Android SQLite and inexact `AlarmManager` provide offline reminder delivery; backend SQLite/API mirrors reminder definitions and autonomy preferences. Autonomy and proactive speech default off; quiet hours default on. Physical alarm/reboot/audio-failure acceptance remains open. Per-device identity, encrypted local storage/transport, automatic summaries, camera, tools, and hardware behavior remain future work. See [Phase 6 reminders](PHASE6_REMINDERS.md), [vision](ROBOT_VISION.md), [technology choices](ROBOT_TECH_STACK.md), [roadmap](ROBOT_ROADMAP.md), [hardware plan](ROBOT_HARDWARE_PLAN.md), and [decisions](ROBOT_DECISIONS.md).
 
 ## 1. Baseline and migration boundary
 
-Android `MainActivity` creates `RobotCore`, `FaceView`, `VoiceInteractionController`, `TextToSpeechManager`, and a `ConversationEngine`. `RobotCore` owns boot/idle/voice/error activity state, session generations, microphone permission, optional-consent state, and host pause/resume. It returns effects for the host to execute and rejects stale session events. `VoiceInteractionController` no longer owns a parallel activity state machine. `FaceBehavior` still owns autonomous **eye** behavior. The backend provides `GET /healthz`, `GET /v1/config`, `POST /v1/conversations`, and authenticated memory management endpoints. It bounds the eight-message history, uses opt-in structured SQLite memories, builds a bounded untrusted-memory prompt context, calls the selected provider, and returns a short reply. Android stores recent conversation text separately in `SharedPreferences`. The optional shared-token gate protects config, conversation, and memory routes when configured; Android stores the token encrypted with Android Keystore. A native Android speech recognition adapter is the default, but the GM 5 Plus service's Turkish accuracy and offline behavior remain unverified. Per-device isolation, encrypted memory storage/transport, camera, tool execution, and ESP32 remain unimplemented.
+Android `MainActivity` creates `RobotCore`, `FaceView`, `VoiceInteractionController`, `TextToSpeechManager`, a `ConversationEngine`, and the local reminder store/scheduler. `RobotCore` owns boot/idle/voice/proactive-speech/error activity state, session generations, microphone/consent state, and host pause/resume. It returns effects for the host to execute and rejects stale session events. `VoiceInteractionController` intercepts only explicit reminder commands from the current recognized transcript; ordinary conversation remains on the existing backend path. The backend provides health/config/conversation, memory, reminder CRUD, and autonomy settings routes. It bounds the eight-message conversation history, uses opt-in structured SQLite memories, and stores a separate validated reminder/settings mirror. The optional shared-token gate protects config, conversation, memory, and reminder routes when configured; Android stores the token encrypted with Android Keystore. A native Android speech recognition adapter is the default, but GM 5 Plus Turkish accuracy and offline behavior remain unverified. Per-device isolation, encrypted memory storage/transport, camera, tool execution, and ESP32 remain unimplemented.
 
 Add **Robot Core on Android** as the single authority for the robot's visible/activity state, consent, session IDs, and device lifecycle. It receives events from the current voice controller and face; it does not replace their rendering/audio internals. Keep the backend as a **modular monolith** for AI, policy validation, future structured memory, and hardware gateway. The ESP32 later owns real-time electrical safety and rejects unsafe commands independently. A model never controls physical hardware directly.
 
@@ -165,22 +165,24 @@ flowchart LR
 
 Conversation generation, intent classification, tool proposal, and final response are separate operations even if one provider eventually performs several. Default path is one generation call, not a multi-agent chain. A tool proposal names a registered tool and schema version; the executor validates arguments, user authorization, scope, time, idempotency, and resource bounds. Read time/sensor data can be pre-authorized; reminders require user intent; camera, memory deletion, motion, and other impactful effects require explicit permission or confirmation. A refusal/error becomes a visible robot event, not a fabricated success. Provider failure falls back to a clearly labeled local response, never a forged cloud reply.
 
-## 7. Autonomous behavior
+## 7. Controlled reminder delivery
 
 ```mermaid
 flowchart TD
-  Event["Local timer, touch, sensor, schedule"] --> Candidate["Autonomy candidate"]
-  Candidate --> Gate["Consent, quiet hours, cooldown, budget"]
-  Gate -->|"reject"| Silent["Remain quiet; record reason code"]
-  Gate -->|"allow local"| LocalAction["Face cue / prewritten reminder"]
-  Gate -->|"allow AI if opted in"| AIRequest["One bounded backend request"]
-  LocalAction --> State["Robot Core reducer"]
-  AIRequest --> State
-  State --> Feedback["Outcome + next eligible time"]
-  Feedback --> Event
+  Alarm["Inexact local alarm"] --> Eligible["Stored, explicit reminder occurrence"]
+  Eligible --> Consent{"Autonomy on?"}
+  Consent -->|"no"| Hold["Keep saved; no delivery"]
+  Consent -->|"yes"| Quiet{"Quiet hours?"}
+  Quiet -->|"yes"| Defer["Queue until allowed window"]
+  Quiet -->|"no"| Foreground{"Activity foreground and Core idle?"}
+  Foreground -->|"yes + speech consent"| Speak["One local TTS reminder"]
+  Foreground -->|"no / speech off / busy"| Notify["Silent Android notification or defer"]
+  Speak --> Done["Persist occurrence result; schedule next recurrence"]
+  Notify --> Done
+  Defer --> Alarm
 ```
 
-Events wake a bounded evaluation; there is no permanent reasoning loop. Initial defaults: no autonomous cloud calls, no unsolicited microphone/camera, no autonomous motion, and no proactive speech during quiet hours. If user opts in later, cap proactive speech (example design limit: one per 30 minutes and three per day), require a meaningful trigger, provide a visible mute, and back off after rejection or no response. These are policy defaults to test, not existing behavior. Face-only idle animation remains allowed. Phone sleep/background lifecycle must stop active capture and timers appropriately; Android 7 background behavior is tested on-device rather than assumed.
+Reminders are the only Phase 6 proactive trigger. They originate from an explicit schedule command or the settings UI; no idle AI loop, greeting, or memory-to-reminder conversion exists. Android stores the schedule and occurrence state locally, uses inexact alarms, defers through quiet hours or an active RobotCore turn, and falls back to silent notifications when speech is disabled or the app is backgrounded. TTS retries are bounded to three attempts. Defaults are autonomy off, proactive speech off, and quiet hours enabled at 23:00–08:00. Manufacturer alarm delay and reboot/process-death behavior still require physical GM 5 Plus acceptance; see [Phase 6 manual checks](PHASE6_REMINDERS.md).
 
 ## 8. Robot state machine
 

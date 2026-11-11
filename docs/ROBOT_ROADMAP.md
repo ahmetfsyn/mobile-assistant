@@ -1,6 +1,6 @@
 # Phased Robot Roadmap
 
-This roadmap is a sequence of **small, separately reversible deliveries**, not authorization to implement them all. Complexity is a rough one-engineer estimate after the specified dependencies are available; device-specific investigation and hardware procurement can dominate it. Every phase keeps the existing face, tap-to-talk, provider-neutral backend, local Docker route, Turkish default, and API 24 build working. Phase 1 is implemented. Phase 2's platform adapter is implemented, with physical-device acceptance still open. Phase 4's local personality/emotion implementation is in place and the face was visually reviewed on the GM 5 Plus (API 25); spoken-quality review remains open. Phase 5 now has an initial consent-gated SQLite memory implementation; per-device isolation, encrypted local transport/storage, export, and automatic summaries remain open. Phase 3 reliability soak and all later phases remain planned.
+This roadmap is a sequence of **small, separately reversible deliveries**, not authorization to implement them all. Complexity is a rough one-engineer estimate after the specified dependencies are available; device-specific investigation and hardware procurement can dominate it. Every phase keeps the existing face, tap-to-talk, provider-neutral backend, local Docker route, Turkish default, and API 24 build working. Phase 1 is implemented. Phase 2's platform adapter is implemented, with physical-device acceptance still open. Phase 4's local personality/emotion implementation is in place and the face was visually reviewed on the GM 5 Plus (API 25); spoken-quality review remains open. Phase 5 has an initial consent-gated SQLite memory implementation; per-device isolation, encrypted local transport/storage, export, and automatic summaries remain open. Phase 6 now has an initial local reminder and controlled-delivery implementation; physical-device alarm acceptance remains open. Phase 3 reliability soak and phases 7–10 remain planned.
 
 ## Priority and gates
 
@@ -13,7 +13,7 @@ This roadmap is a sequence of **small, separately reversible deliveries**, not a
 | 3 | Robust turn-taking and interruption | Medium, ~1–2 weeks | No | Yes |
 | 4 | Personality and bounded emotion — implemented; device review open | Medium, ~1–2 weeks | No | Yes locally; Gemini usage remains quota-dependent |
 | 5 | Consent-gated persistent memory — initial version implemented | High, ~2–4 weeks | No; backup storage optional | Yes locally |
-| 6 | Controlled autonomy and reminders | High, ~2–3 weeks | No | Yes if local-only triggers; optional Gemini calls must respect free quota |
+| 6 | Controlled autonomy and reminders — initial implementation in place; device acceptance open | High, ~2–3 weeks | No | Yes; local schedule, no background AI loop |
 | 7 | Opt-in vision | High, ~2–4 weeks | No if phone camera geometry works | Yes for basic motion; ML may need host resources |
 | 8 | ESP32 sensor integration | High, ~2–4 weeks | Yes unless owned | Yes ongoing, **not zero up-front** |
 | 9 | Physical body and safe motors | Very high, ~4–8+ weeks | Yes | No zero-up-front claim; software may remain free |
@@ -64,10 +64,12 @@ Android consent defaults off and is sent on each conversation request. When enab
 
 ## Phase 6 — Controlled autonomy and reminders
 
-- **Objective/modules:** Local schedule/event candidates, quiet hours, cooldowns, daily budget, opt-in proactive speech, reliable reminders, mute and failure recovery. Start with prewritten local utterances; no idle AI loop.
-- **Dependencies/expected components:** Core, permission UI, memory for durable reminders; `AutonomyPolicy`, `ReminderStore`, `ScheduleDriver`, event audit. Backend only for an approved generation request.
-- **Acceptance/testing:** With default settings, zero unsolicited cloud calls, camera captures, and motor actions; no speech in quiet hours; one reminder fires once despite restart; cooldown and daily limit hold; cancellation and errors back off. Fake-clock policy tests and multi-day device simulation.
-- **Risk/cost:** Annoying behavior and accidental API usage. High; 0 TL with local actions, optional Gemini calls only under a hard free-tier budget.
+- **Objective/modules:** Deliver only explicit, user-approved reminders and routines; use local prewritten wording and keep the AI backend out of alarm delivery.
+- **Dependencies/expected components:** Android `ReminderStore` SQLite cache and inexact `AlarmManager`, Turkish deterministic parser, `RobotCore` proactive-speech state gate, settings/management UI, quiet-hour queue, bounded retries, and matching backend SQLite/API mirror.
+- **Acceptance/testing:** Unit tests cover Turkish parsing, ambiguity, weekday recurrence, quiet hours, and `RobotCore` idle/consent gates. Backend tests cover reminder CRUD, validation, safe settings defaults, and persistence. Debug and instrumentation APKs build. Manual GM 5 Plus reboot, process-death, notification, audio-focus, and timezone checks remain outstanding.
+- **Current behavior:** Autonomy and proactive speech start off; quiet hours start enabled at 23:00–08:00. Android stores reminders locally and arms inexact alarms, so delivery does not need the Mac. If the face app is open and idle with both gates enabled, an eligible reminder is spoken; otherwise it is delivered as a silent Android notification. Quiet or busy reminders are deferred. Speech errors retry up to three times, then leave a notification/manual retry path. Only clear Turkish schedule commands are handled locally; ambiguous time requests ask a follow-up instead of being saved.
+- **Limitations:** Android may defer inexact alarms and some manufacturers apply extra battery restrictions. These behaviors need a physical-device test; the app does not use a permanent service or hold a wake lock between alarms.
+- **Details and manual procedure:** [Phase 6 reminders](PHASE6_REMINDERS.md).
 
 ## Phase 7 — Opt-in vision and environmental perception
 

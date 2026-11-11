@@ -80,6 +80,84 @@ test("health and config endpoints expose active provider/model but never credent
   });
 });
 
+test("reminder API validates, persists, pauses, resumes and deletes local reminders", async () => {
+  await withServer({ env: { AI_PROVIDER: "mock" } }, async (baseUrl) => {
+    const payload = {
+      id: "a1b2c3d4-0000-4000-8000-123456789abc",
+      message: "Toplantıyı hatırla",
+      scheduledAt: "2030-01-02T10:00:00.000Z",
+      timeZone: "Europe/Istanbul",
+      recurrence: "weekly:MO",
+      enabled: true
+    };
+    const createdResponse = await fetch(`${baseUrl}/v1/reminders`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
+    });
+    assert.equal(createdResponse.status, 201);
+    const created = (await createdResponse.json()).reminder;
+    assert.equal(created.id, payload.id);
+    assert.equal(created.status, "scheduled");
+    assert.equal(created.recurrence, "weekly:MO");
+
+    const repeated = await fetch(`${baseUrl}/v1/reminders`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
+    }).then((response) => response.json());
+    assert.equal(repeated.reminder.id, payload.id);
+
+    const list = await fetch(`${baseUrl}/v1/reminders`).then((response) => response.json());
+    assert.equal(list.reminders.length, 1);
+    assert.equal(list.reminders[0].message, payload.message);
+
+    const pausedResponse = await fetch(`${baseUrl}/v1/reminders/${payload.id}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: "paused" })
+    });
+    assert.equal((await pausedResponse.json()).reminder.status, "paused");
+    const resumed = await fetch(`${baseUrl}/v1/reminders/${payload.id}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: "scheduled" })
+    }).then((response) => response.json());
+    assert.equal(resumed.reminder.status, "scheduled");
+
+    const invalid = await fetch(`${baseUrl}/v1/reminders`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...payload, id: undefined, timeZone: "not/a-zone" })
+    });
+    assert.equal(invalid.status, 400);
+    assert.equal((await invalid.json()).error.code, "invalid_reminder_timezone");
+
+    assert.equal((await fetch(`${baseUrl}/v1/reminders/${payload.id}`, { method: "DELETE" })).status, 200);
+    assert.equal((await fetch(`${baseUrl}/v1/reminders`).then((response) => response.json())).reminders.length, 0);
+  });
+});
+
+test("autonomy settings default to safe values and update with validation", async () => {
+  await withServer({ env: { AI_PROVIDER: "mock" } }, async (baseUrl) => {
+    const initial = await fetch(`${baseUrl}/v1/autonomy`).then((response) => response.json());
+    assert.deepEqual({
+      autonomyEnabled: initial.settings.autonomyEnabled,
+      proactiveSpeechEnabled: initial.settings.proactiveSpeechEnabled,
+      quietHoursEnabled: initial.settings.quietHoursEnabled,
+      quietHoursStart: initial.settings.quietHoursStart,
+      quietHoursEnd: initial.settings.quietHoursEnd
+    }, {
+      autonomyEnabled: false, proactiveSpeechEnabled: false, quietHoursEnabled: true,
+      quietHoursStart: "23:00", quietHoursEnd: "08:00"
+    });
+    const updated = await fetch(`${baseUrl}/v1/autonomy`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ autonomyEnabled: true, proactiveSpeechEnabled: true, quietHoursStart: "22:30" })
+    });
+    assert.equal(updated.status, 200);
+    const settings = (await updated.json()).settings;
+    assert.equal(settings.autonomyEnabled, true);
+    assert.equal(settings.proactiveSpeechEnabled, true);
+    assert.equal(settings.quietHoursStart, "22:30");
+    const invalid = await fetch(`${baseUrl}/v1/autonomy`, {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ quietHoursEnd: "25:00" })
+    });
+    assert.equal(invalid.status, 400);
+  });
+});
+
 test("configured companion access token gates config and conversation routes without leaking credentials", async () => {
   const accessToken = "c".repeat(48);
   const entries = [];
