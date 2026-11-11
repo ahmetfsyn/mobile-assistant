@@ -85,7 +85,11 @@ class MainActivity : Activity() {
         reminderScheduler = scheduler
         reminderApiClient = reminderApi
         core.dispatch(RobotEvent.PersistentMemoryConsentChanged(consentStore.isEnabled()))
-        applyReminderSettingsToRobot(reminderSettings.get())
+        val startupReminderSettings = reminderSettings.prepareForBuildDefaults(
+            BuildConfig.PHASE6_MANUAL_TEST_DEFAULTS
+        )
+        applyReminderSettingsToRobot(startupReminderSettings)
+        if (BuildConfig.PHASE6_MANUAL_TEST_DEFAULTS) syncReminderSettings(startupReminderSettings)
         val reminderCommands = ReminderCommandProcessor(
             reminders, reminderSettings, scheduler,
             onSettingsChanged = { settings ->

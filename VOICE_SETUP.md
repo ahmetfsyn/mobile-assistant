@@ -95,7 +95,19 @@ Gerçek sağlayıcı anahtarı olmadan yapılan backend testleri sadece sahte ya
 
 ## Hatırlatmalar ve kontrollü otonomi
 
-Yüz panelindeki ayarlar → **Güvenlik ve Gizlilik** → **Otonomi ve Hatırlatıcılar** yolunu açın. İlk kurulumda hatırlatmalar ve sesli proaktif konuşma kapalı, 23:00–08:00 sessiz saatler açıktır. Hatırlatma eklemek tek başına konuşma izni vermez; teslimatı başlatmak için otonomiyi açıkça etkinleştirin. Sesli teslimat ayrıca ayrı bir tercihtir. Sessiz saatlerde veya robot konuşma/dinleme durumundayken hatırlatma ertelenir; uygulama arka plandaysa hatırlatma sessiz Android bildirimi olarak gösterilir.
+Yüz panelindeki ayarlar → **Güvenlik ve Gizlilik** → **Otonomi ve Hatırlatıcılar** yolunu açın. Normal derlemede ilk kurulumda hatırlatmalar ve sesli proaktif konuşma kapalı, 23:00–08:00 sessiz saatler açıktır. Hatırlatma eklemek tek başına konuşma izni vermez; teslimatı başlatmak için otonomiyi açıkça etkinleştirin. Sesli teslimat ayrıca ayrı bir tercihtir. Sessiz saatlerde veya robot konuşma/dinleme durumundayken hatırlatma ertelenir; uygulama arka plandaysa hatırlatma sessiz Android bildirimi olarak gösterilir.
+
+#### Phase 6 cihaz testi derlemesi
+
+GM 5 Plus üzerinde kontrollü Phase 6 testi için ayrı bir debug APK oluşturun:
+
+```sh
+./gradlew assembleDebug -Pphase6ManualTestDefaults=true -PcompanionBackendUrl=http://MAC_LOCAL_IP:3000
+```
+
+`MAC_LOCAL_IP` değerini Mac'in aynı Wi-Fi ağındaki geçerli özel IP adresiyle değiştirin. Bu derleme ilk açılışta otonomiyi ve proaktif konuşmayı etkinleştirir, sessiz saatleri kapatır ve ayarları cihazda saklar. Bu başlangıç ayarı yalnızca bir kez uygulanır; ayar ekranındaki tüm kontroller kullanılabilir ve sonraki kullanıcı değişiklikleri korunur. Android backend adresini mevcut Gradle özelliğiyle aldığı için hatırlatma ayar senkronizasyonu yapılandırılmış backend'e arka planda gönderilir. `phase6ManualTestDefaults` kullanılmayan normal derlemelerin güvenli varsayılanları değişmez. Backend URL'si verilmezse yerel alarm ve hatırlatmalar çalışmaya devam eder, ancak backend eşitlemesi devre dışı kalır.
+
+Android 7.1.1'de bildirimler için çalışma zamanı izni diyaloğu yoktur. Hatırlatma bildirimi görünmüyorsa Android uygulama bildirim ayarlarında **Masa Arkadaşı** bildirimlerinin açık olduğunu kontrol edin. Üretici pil yönetimi veya Doze alarm teslimini geciktirebilir; fiziksel teslimi cihazda ayrıca sınayın.
 
 Anlaşılır Türkçe örnekler: “Yarın saat 10'da toplantıyı hatırlat”, “30 dakika sonra su içmemi hatırlat”, “Her sabah saat 9'da beni selamla” ve “Her pazartesi saat 10'da haftalık planımı hatırlat”. Saat belirsiz veya geçmişse robot kayıt yapmadan netleştirme ister. “Bugünkü hatırlatmalarım neler?”, “Hatırlatmaları kapat”, “Hatırlatmaları tekrar aç”, “Toplantı hatırlatmasını sil”, “... hatırlatmasını duraklat/tamamla” gibi açık komutlar desteklenir. Hatırlatma düzenleme ve diğer CRUD işlemleri yönetim ekranındadır. Hatırlatma metni Gemini'ye gönderilmez; backend route'ları yalnızca yerel Docker backend yapılandırılmışsa en iyi çabayla aynalanır.
 

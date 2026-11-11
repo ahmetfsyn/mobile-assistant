@@ -8,6 +8,10 @@ val companionBackendUrl = providers.gradleProperty("companionBackendUrl")
     .getOrElse("")
     .replace("\\", "\\\\")
     .replace("\"", "\\\"")
+val phase6ManualTestDefaults = providers.gradleProperty("phase6ManualTestDefaults")
+    .orElse("false")
+    .get()
+    .toBoolean()
 
 android {
     namespace = "com.companion.assistant"
@@ -20,6 +24,7 @@ android {
         versionCode = 1
         versionName = "0.1.0"
         buildConfigField("String", "COMPANION_BACKEND_URL", "\"$companionBackendUrl\"")
+        buildConfigField("boolean", "PHASE6_MANUAL_TEST_DEFAULTS", phase6ManualTestDefaults.toString())
         testInstrumentationRunner = "com.companion.assistant.BackendProbeInstrumentation"
     }
 

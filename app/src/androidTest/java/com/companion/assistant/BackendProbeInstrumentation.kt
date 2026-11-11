@@ -2,6 +2,8 @@ package com.companion.assistant
 
 import android.app.Instrumentation
 import android.os.Bundle
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.UUID
 
 /** ADB-only probe that exercises the same conversation client used by the face. */
@@ -10,6 +12,9 @@ class BackendProbeInstrumentation : Instrumentation() {
     private var conversationBatch = false
     private var securityStoreProbe = false
     private var reminderStoreProbe = false
+    private var reminderSettingsProbe = false
+    private var backendHealthProbe = false
+    private var backendReminderSyncProbe = false
     private var endpointOverride: String? = null
 
     override fun onCreate(arguments: Bundle?) {
@@ -18,6 +23,9 @@ class BackendProbeInstrumentation : Instrumentation() {
         conversationBatch = arguments?.getString("conversationBatch") == "true"
         securityStoreProbe = arguments?.getString("securityStore") == "true"
         reminderStoreProbe = arguments?.getString("reminderStore") == "true"
+        reminderSettingsProbe = arguments?.getString("reminderSettings") == "true"
+        backendHealthProbe = arguments?.getString("backendHealth") == "true"
+        backendReminderSyncProbe = arguments?.getString("backendReminderSync") == "true"
         endpointOverride = arguments?.getString("endpoint")?.trim()?.takeIf(String::isNotEmpty)
         start()
     }
@@ -44,9 +52,60 @@ class BackendProbeInstrumentation : Instrumentation() {
                 return
             }
 
+            if (reminderSettingsProbe) {
+                stage = "reminder_settings"
+                val settings = ReminderSettingsStore(targetContext).get()
+                check(settings.autonomyEnabled) { "Reminder autonomy is disabled." }
+                check(settings.proactiveSpeechEnabled) { "Proactive speech is disabled." }
+                check(!settings.quietHoursEnabled) { "Quiet hours are enabled." }
+                results.putString("autonomyEnabled", settings.autonomyEnabled.toString())
+                results.putString("proactiveSpeechEnabled", settings.proactiveSpeechEnabled.toString())
+                results.putString("quietHoursEnabled", settings.quietHoursEnabled.toString())
+                results.putString("reminderSettings", "ok")
+                results.putString("result", "ok")
+                finish(0, results)
+                return
+            }
+
+            if (backendHealthProbe) {
+                stage = "backend_health"
+                val endpoint = endpointOverride ?: BuildConfig.COMPANION_BACKEND_URL
+                check(endpoint.isNotBlank()) { "Backend URL is empty in this APK." }
+                val connection = URL("${endpoint.trimEnd('/')}/healthz").openConnection() as HttpURLConnection
+                connection.requestMethod = "GET"
+                connection.connectTimeout = 5_000
+                connection.readTimeout = 5_000
+                val status = try { connection.responseCode } finally { connection.disconnect() }
+                check(status == 200) { "Backend health returned HTTP $status." }
+                results.putInt("healthStatus", status)
+                results.putString("backendHealth", "ok")
+                results.putString("result", "ok")
+                finish(0, results)
+                return
+            }
+
+            if (backendReminderSyncProbe) {
+                stage = "backend_reminder_sync"
+                val endpoint = endpointOverride ?: BuildConfig.COMPANION_BACKEND_URL
+                check(endpoint.isNotBlank()) { "Backend URL is empty in this APK." }
+                val tokenStore = CompanionAccessTokenStore(targetContext)
+                val settings = ReminderSettingsStore(targetContext).get()
+                ReminderApiClient(endpoint, tokenStore::accessToken).syncSettings(settings)
+                results.putString("backendReminderSync", "ok")
+                results.putString("result", "ok")
+                finish(0, results)
+                return
+            }
+
             val endpoint = endpointOverride ?: BuildConfig.COMPANION_BACKEND_URL
             check(endpoint.isNotBlank()) { "Backend URL is empty in this APK." }
-            val engine = ConversationEngineFactory.create(endpoint)
+            val tokenStore = CompanionAccessTokenStore(targetContext)
+            val consentStore = MemoryConsentStore(targetContext)
+            val engine = ConversationEngineFactory.create(
+                endpoint = endpoint,
+                accessTokenProvider = tokenStore::accessToken,
+                memoryConsentProvider = consentStore::isEnabled
+            )
             val configuration = engine.fetchConfiguration()
             results.putString("provider", configuration.provider)
             results.putString("model", configuration.model)

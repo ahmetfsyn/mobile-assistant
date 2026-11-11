@@ -290,11 +290,26 @@ internal class ReminderSettingsStore(context: Context) {
             .apply()
     }
 
+    /** Applies test-only defaults once, preserving any later manual changes made by the user. */
+    @Synchronized
+    fun prepareForBuildDefaults(manualTestBuild: Boolean): ReminderSettings {
+        if (!manualTestBuild || preferences.getBoolean(KEY_TEST_DEFAULTS_APPLIED, false)) return get()
+        val settings = get().copy(
+            autonomyEnabled = true,
+            proactiveSpeechEnabled = true,
+            quietHoursEnabled = false
+        )
+        save(settings)
+        preferences.edit().putBoolean(KEY_TEST_DEFAULTS_APPLIED, true).apply()
+        return settings
+    }
+
     private companion object {
         const val KEY_AUTONOMY = "autonomy_enabled"
         const val KEY_SPEECH = "proactive_speech_enabled"
         const val KEY_QUIET = "quiet_hours_enabled"
         const val KEY_START = "quiet_hours_start"
         const val KEY_END = "quiet_hours_end"
+        const val KEY_TEST_DEFAULTS_APPLIED = "phase6_manual_test_defaults_applied"
     }
 }
