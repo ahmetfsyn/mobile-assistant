@@ -65,7 +65,7 @@ internal class ReminderScheduler(context: Context, private val store: ReminderSt
 
     private fun setAlarm(id: String, expectedAt: Long, triggerAt: Long) {
         val pending = PendingIntent.getBroadcast(appContext, id.hashCode(), alarmIntent(id, expectedAt), pendingFlags())
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pending)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pending)
         else alarmManager.set(AlarmManager.RTC_WAKEUP, triggerAt, pending)
     }
 
