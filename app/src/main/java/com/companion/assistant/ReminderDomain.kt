@@ -1,6 +1,6 @@
 package com.companion.assistant
 
-import java.text.DateFormat
+import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
 import java.util.TimeZone
@@ -237,8 +237,8 @@ internal object ReminderTimePolicy {
         return if (start == end) false else if (start < end) minute in start until end else minute >= start || minute < end
     }
 
-    fun formatLocal(millis: Long, zoneId: String): String = DateFormat.getDateTimeInstance(
-        DateFormat.MEDIUM, DateFormat.SHORT, Locale("tr", "TR")
+    fun formatLocal(millis: Long, zoneId: String): String = SimpleDateFormat(
+        "dd MMM yyyy, HH:mm", Locale("tr", "TR")
     ).apply { timeZone = TimeZone.getTimeZone(zoneId) }.format(millis)
 
     private fun parseMinutes(value: String): Int {

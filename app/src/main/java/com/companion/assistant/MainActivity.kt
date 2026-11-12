@@ -3,6 +3,8 @@ package com.companion.assistant
 import android.Manifest
 import android.app.AlertDialog
 import android.app.Activity
+import android.net.ConnectivityManager
+import android.net.Network
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -43,6 +45,7 @@ class MainActivity : Activity() {
     private var reminderApiClient: ReminderApiClient? = null
     private var reminderManagerDialog: ReminderManagerDialog? = null
     private var reminderReceiverRegistered = false
+    private var reminderNetworkCallback: ConnectivityManager.NetworkCallback? = null
     private val reminderSyncExecutor: ExecutorService = Executors.newSingleThreadExecutor { task ->
         Thread(task, "companion-reminder-sync").apply { isDaemon = true }
     }
@@ -51,6 +54,12 @@ class MainActivity : Activity() {
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val reminderSyncRetry = object : Runnable {
+        override fun run() {
+            if (!ReminderHost.isVisible) return
+            retryPendingReminderSyncs()
+        }
+    }
     private val reminderDueReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) = handleReminderDue(intent)
     }
@@ -130,6 +139,7 @@ class MainActivity : Activity() {
         applyImmersiveFullscreen()
         ReminderHost.isVisible = true
         registerReminderReceiver()
+        registerReminderNetworkCallback()
         dispatchRobotEvent(RobotEvent.HostResumed)
         if (!microphonePermissionRequestPending) {
             dispatchRobotEvent(RobotEvent.MicrophonePermissionChanged(hasMicrophonePermission()))
@@ -137,7 +147,7 @@ class MainActivity : Activity() {
         reminderSettingsStore?.get()?.let(::applyReminderSettingsToRobot)
         reminderStore?.recoverDue()?.forEach { reminderScheduler?.schedule(it) }
         reminderScheduler?.scheduleAll()
-        retryPendingDeliveredReminderSyncs()
+        retryPendingReminderSyncs()
         faceView?.start()
     }
 
@@ -149,6 +159,8 @@ class MainActivity : Activity() {
     override fun onPause() {
         ReminderHost.isVisible = false
         unregisterReminderReceiver()
+        unregisterReminderNetworkCallback()
+        mainHandler.removeCallbacks(reminderSyncRetry)
         dispatchRobotEvent(RobotEvent.HostPaused)
         faceView?.stop()
         super.onPause()
@@ -177,6 +189,7 @@ class MainActivity : Activity() {
         memoryDialog = null
         reminderManagerDialog?.dismiss()
         reminderManagerDialog = null
+        unregisterReminderNetworkCallback()
         dispatchRobotEvent(RobotEvent.CloseRequested)
         voiceController?.close()
         voiceController = null
@@ -316,7 +329,8 @@ class MainActivity : Activity() {
             scheduler = scheduler,
             onSettingsChanged = ::applyReminderSettings,
             syncReminder = ::syncReminderRecord,
-            syncDelete = ::syncReminderDeletion
+            syncDelete = ::syncReminderDeletion,
+            onTestProactiveSpeech = ::runProactiveSpeechTest
         )
         reminderManagerDialog = manager
         manager.show()
@@ -345,50 +359,56 @@ class MainActivity : Activity() {
     }
 
     private fun syncReminderRecord(reminder: ReminderRecord, isNew: Boolean) {
-        reminderSyncExecutor.execute {
-            try {
-                val api = reminderApiClient ?: return@execute
-                if (isNew) api.create(reminder) else api.sync(reminder)
-                PendingReminderSyncStore(applicationContext).markSynced(reminder.id)
-            } catch (error: Exception) {
-                android.util.Log.w("ReminderSync", "reminder_sync_failed id=${reminder.id} reason=${reminderSyncFailureReason(error)}")
-            }
-        }
+        android.util.Log.i("ReminderSync", "local_reminder_saved id=${reminder.id} action=${if (isNew) "create" else "update"}")
+        retryPendingReminderSyncs()
     }
 
     private fun syncReminderDeletion(id: String) {
+        android.util.Log.i("ReminderSync", "local_reminder_deleted id=$id")
+        retryPendingReminderSyncs()
+    }
+
+    private fun retryPendingReminderSyncs() {
+        val store = reminderStore ?: return
+        val api = reminderApiClient ?: return
+        if (BuildConfig.COMPANION_BACKEND_URL.isBlank() || store.pendingSyncCount() == 0) return
+        mainHandler.removeCallbacks(reminderSyncRetry)
+        if (ReminderHost.isVisible) mainHandler.postDelayed(reminderSyncRetry, REMINDER_SYNC_RETRY_MS)
         reminderSyncExecutor.execute {
             try {
-                reminderApiClient?.delete(id)
-                PendingReminderSyncStore(applicationContext).markSynced(id)
-            }
-            catch (error: Exception) {
-                android.util.Log.w("ReminderSync", "reminder_delete_sync_failed id=$id reason=${reminderSyncFailureReason(error)}")
+                val count = ReminderSyncDispatcher(store, api).flush()
+                android.util.Log.i("ReminderSync", "outbox_flushed count=$count pending=${store.pendingSyncCount()}")
+            } catch (error: Exception) {
+                android.util.Log.w("ReminderSync", "outbox_flush_failed reason=${reminderSyncFailureReason(error)} pending=${store.pendingSyncCount()}")
             }
         }
     }
 
-    private fun retryPendingDeliveredReminderSyncs() {
-        if (BuildConfig.COMPANION_BACKEND_URL.isBlank()) return
-        val queue = PendingReminderSyncStore(applicationContext)
-        val store = reminderStore ?: return
-        val api = reminderApiClient ?: return
-        queue.pendingIds().forEach { id ->
-            val reminder = store.get(id)
-            if (reminder == null) {
-                queue.markSynced(id)
-            } else {
-                reminderSyncExecutor.execute {
-                    try {
-                        api.sync(reminder)
-                        queue.markSynced(id)
-                        android.util.Log.i("ReminderSync", "delivery_retry_succeeded id=$id")
-                    } catch (error: Exception) {
-                        android.util.Log.w("ReminderSync", "delivery_retry_failed id=$id reason=${reminderSyncFailureReason(error)}")
-                    }
+    private fun flushReminderSyncQueue() = retryPendingReminderSyncs()
+
+    private fun registerReminderNetworkCallback() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N || reminderNetworkCallback != null) return
+        val manager = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                mainHandler.post {
+                    if (!isFinishing && !isDestroyed) flushReminderSyncQueue()
                 }
             }
         }
+        try {
+            manager.registerDefaultNetworkCallback(callback)
+            reminderNetworkCallback = callback
+        } catch (error: RuntimeException) {
+            android.util.Log.w("ReminderSync", "network_callback_unavailable type=${error.javaClass.simpleName}")
+        }
+    }
+
+    private fun unregisterReminderNetworkCallback() {
+        val callback = reminderNetworkCallback ?: return
+        val manager = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        try { manager?.unregisterNetworkCallback(callback) } catch (_: RuntimeException) { }
+        reminderNetworkCallback = null
     }
 
     private fun reminderSyncFailureReason(error: Exception): String {
@@ -455,7 +475,8 @@ class MainActivity : Activity() {
             return
         }
         ReminderNotifications.cancel(this, id)
-        started.speakProactiveReminder(reminder.message) { spoke ->
+        ProactiveSpeechFlow { text, callback -> started.speakProactiveReminder(text, callback) }
+            .request(reminder.message, allowed = true) { spoke ->
             val finishedAt = System.currentTimeMillis()
             if (spoke) {
                 store.markDelivered(id, expectedAt, finishedAt)
@@ -474,6 +495,37 @@ class MainActivity : Activity() {
                 }
             }
         }
+    }
+
+    private fun runProactiveSpeechTest() {
+        val settings = reminderSettingsStore?.get() ?: return
+        val now = System.currentTimeMillis()
+        val zoneId = java.util.TimeZone.getDefault().id
+        val cooldown = ReminderCooldownStore(applicationContext)
+        val coreState = robotCore?.snapshot?.activity ?: RobotActivityState.ERROR
+        val blocked = ProactiveSpeechGate.blockedReason(
+            settings, now, zoneId, coreState, cooldown.nextAllowedAt(now)
+        )
+        if (blocked != null) {
+            Toast.makeText(this, "Ses testi başlatılamadı: $blocked.", Toast.LENGTH_LONG).show()
+            return
+        }
+        val controller = voiceController
+        if (controller == null) {
+            Toast.makeText(this, "Ses sistemi hazır değil.", Toast.LENGTH_LONG).show()
+            return
+        }
+        val flow = ProactiveSpeechFlow { text, callback -> controller.speakProactiveReminder(text, callback) }
+        val accepted = flow.request("Proaktif ses testi. Türkçe konuşma sistemi hazır.", allowed = true) { spoke ->
+            if (spoke) {
+                cooldown.markSpoken(System.currentTimeMillis())
+                Toast.makeText(this, "Ses testi tamamlandı.", Toast.LENGTH_SHORT).show()
+            } else {
+                android.util.Log.w("ProactiveSpeech", "test_tts_failed")
+                Toast.makeText(this, "Ses testi başarısız. Türkçe ses verisini ve ses çıkışını kontrol et.", Toast.LENGTH_LONG).show()
+            }
+        }
+        if (!accepted) Toast.makeText(this, "Ses testi başlatılamadı.", Toast.LENGTH_LONG).show()
     }
 
     private fun syncReminderState(reminder: ReminderRecord?) {
@@ -770,6 +822,7 @@ class MainActivity : Activity() {
 
     private companion object {
         const val REQUEST_MICROPHONE = 4101
+        const val REMINDER_SYNC_RETRY_MS = 30_000L
         const val ERROR_DISPLAY_MS = 1800L
         val ACTIVE_FACE_STATES = setOf(
             RobotActivityState.LISTENING,

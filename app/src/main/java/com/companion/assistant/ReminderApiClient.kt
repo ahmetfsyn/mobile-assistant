@@ -11,7 +11,7 @@ import java.util.TimeZone
 internal class ReminderApiClient(
     private val endpoint: String,
     private val accessTokenProvider: () -> String
-) {
+) : ReminderSyncApi {
     fun syncSettings(settings: ReminderSettings) {
         request("PUT", "/v1/autonomy", JSONObject()
             .put("autonomyEnabled", settings.autonomyEnabled)
@@ -22,50 +22,38 @@ internal class ReminderApiClient(
     }
 
     fun create(reminder: ReminderRecord) {
-        request("POST", "/v1/reminders", reminderJson(reminder))
+        request("POST", "/v1/reminders", reminder.toBackendJson())
     }
 
     fun update(reminder: ReminderRecord) {
-        request("PATCH", "/v1/reminders/${reminder.id}", reminderJson(reminder))
+        request("PATCH", "/v1/reminders/${reminder.id}", reminder.toBackendJson())
     }
 
-    /** Mirrors local authority: update existing backend records, creating them if an earlier sync was offline. */
-    fun sync(reminder: ReminderRecord) {
+    /** Upsert with a stable local ID, making retries safe when a response was lost in transit. */
+    fun sync(reminder: ReminderRecord) = syncSnapshot(reminder.toBackendJson().toString())
+
+    override fun syncSnapshot(payload: String) {
+        val snapshot = JSONObject(payload)
         try {
-            update(reminder)
+            request("PATCH", "/v1/reminders/${snapshot.getString("id")}", snapshot)
         } catch (error: IOException) {
             if (!Regex("HTTP 404\\.").containsMatchIn(error.message.orEmpty())) throw error
-            create(reminder)
+            request("POST", "/v1/reminders", snapshot)
         }
     }
 
-    fun delete(id: String) {
-        request("DELETE", "/v1/reminders/$id", null)
+    override fun delete(id: String) {
+        try {
+            request("DELETE", "/v1/reminders/$id", null)
+        } catch (error: IOException) {
+            // A retry after an ambiguous network failure is safe if the record is already absent.
+            if (!Regex("HTTP 404\\.").containsMatchIn(error.message.orEmpty())) throw error
+        }
     }
-
-    private fun reminderJson(reminder: ReminderRecord) = JSONObject()
-        .put("id", reminder.id)
-        .put("message", reminder.message)
-        .put("scheduledAt", timestamp(reminder.scheduledAtMillis))
-        .put("nextScheduledAt", timestamp(reminder.nextAtMillis))
-        .put("lastDeliveredAt", reminder.lastDeliveredAtMillis?.let(::timestamp) ?: JSONObject.NULL)
-        .put("timeZone", reminder.timeZoneId)
-        .put("recurrence", reminder.recurrence)
-        .put("enabled", reminder.status == "scheduled")
-        .put("status", when (reminder.status) {
-            "paused", "needs_attention" -> "paused"
-            "completed", "delivered" -> "completed"
-            else -> "scheduled"
-        })
-
-    private fun timestamp(millis: Long): String = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
-        timeZone = TimeZone.getTimeZone("UTC")
-    }.format(millis)
 
     private fun request(method: String, path: String, body: JSONObject?) {
         if (endpoint.isBlank()) return
-        val base = endpoint.trimEnd('/')
-        val connection = (URL(base + path).openConnection() as HttpURLConnection).apply {
+        val connection = (URL(endpoint.trimEnd('/') + path).openConnection() as HttpURLConnection).apply {
             requestMethod = method
             connectTimeout = 4_000
             readTimeout = 4_000
@@ -85,3 +73,22 @@ internal class ReminderApiClient(
         }
     }
 }
+
+internal fun ReminderRecord.toBackendJson() = JSONObject()
+    .put("id", id)
+    .put("message", message)
+    .put("scheduledAt", timestamp(scheduledAtMillis))
+    .put("nextScheduledAt", timestamp(nextAtMillis))
+    .put("lastDeliveredAt", lastDeliveredAtMillis?.let(::timestamp) ?: JSONObject.NULL)
+    .put("timeZone", timeZoneId)
+    .put("recurrence", recurrence)
+    .put("enabled", status == "scheduled")
+    .put("status", when (status) {
+        "paused", "needs_attention" -> "paused"
+        "completed", "delivered" -> "completed"
+        else -> "scheduled"
+    })
+
+private fun timestamp(millis: Long): String = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
+    timeZone = TimeZone.getTimeZone("UTC")
+}.format(millis)

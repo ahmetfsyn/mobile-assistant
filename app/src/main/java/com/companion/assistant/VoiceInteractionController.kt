@@ -133,6 +133,7 @@ internal class VoiceInteractionController(
                     activeSessionId = null
                     activeInteractionId = null
                     robotCore.dispatch(RobotEvent.ProactiveReminderFinished(session))
+                    Log.i(TAG, "proactive_tts_completed interactionId=$interactionId session=$session")
                     onFinished(true)
                 }
 
@@ -141,6 +142,7 @@ internal class VoiceInteractionController(
                     activeSessionId = null
                     activeInteractionId = null
                     robotCore.dispatch(RobotEvent.ProactiveReminderFailed(session))
+                    Log.w(TAG, "proactive_tts_failed interactionId=$interactionId session=$session reason=${message.take(64)}")
                     onFinished(false)
                 }
             }

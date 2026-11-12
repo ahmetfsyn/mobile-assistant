@@ -5,6 +5,8 @@ import android.media.AudioAttributes
 import android.media.AudioManager
 import android.os.Handler
 import android.os.Looper
+import android.os.Build
+import android.util.Log
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import java.io.Closeable
@@ -23,6 +25,10 @@ internal interface SpeechOutput : Closeable {
         speak(text, language, callback)
     }
     fun stop()
+}
+
+internal object TtsAudioUsage {
+    fun forSdk(sdk: Int): Int = if (sdk >= 26) AudioAttributes.USAGE_ASSISTANT else AudioAttributes.USAGE_MEDIA
 }
 
 /** Native offline-capable Android TTS implementation. */
@@ -139,12 +145,17 @@ internal class TextToSpeechManager(context: Context) : SpeechOutput {
 
         tts.setSpeechRate(0.96f)
         tts.setPitch(1.03f)
-        tts.setAudioAttributes(
+        // USAGE_ASSISTANT was added in API 26; API 24–25 use the normal speaker media route.
+        val usage = TtsAudioUsage.forSdk(Build.VERSION.SDK_INT)
+        val attributesResult = tts.setAudioAttributes(
             AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                .setUsage(usage)
                 .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                 .build()
         )
+        if (attributesResult != TextToSpeech.SUCCESS) {
+            Log.w(TAG, "audio_attributes_rejected sdk=${Build.VERSION.SDK_INT} result=$attributesResult")
+        }
         tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String) {
                 dispatch(utteranceId) { it.onStarted() }
@@ -172,6 +183,7 @@ internal class TextToSpeechManager(context: Context) : SpeechOutput {
             }
         })
         ready = true
+        Log.i(TAG, "engine_ready sdk=${Build.VERSION.SDK_INT} usage=$usage")
         val queued = pending
         pending = null
         if (queued != null) speakReady(queued.text, queued.language, queued.delivery, queued.callback)
@@ -231,6 +243,7 @@ internal class TextToSpeechManager(context: Context) : SpeechOutput {
             currentUtteranceId = null
             abandonAudioFocus()
             callback?.onError("KONUŞMA TAMAMLANAMADI")
+            Log.w(TAG, "utterance_failed id=$utteranceId")
         }
     }
 
@@ -267,5 +280,9 @@ internal class TextToSpeechManager(context: Context) : SpeechOutput {
         engine?.stop()
         abandonAudioFocus()
         callback.onError("SES ODAĞI KESİLDİ")
+    }
+
+    private companion object {
+        const val TAG = "CompanionTts"
     }
 }

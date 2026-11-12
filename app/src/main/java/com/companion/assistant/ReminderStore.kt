@@ -10,8 +10,8 @@ import java.util.UUID
 
 /** Device-side schedule cache. Alarm delivery remains available without the Mac or Wi-Fi. */
 internal class ReminderStore(context: Context) : SQLiteOpenHelper(
-    context.applicationContext, "companion_reminders.db", null, 1
-) {
+    context.applicationContext, "companion_reminders.db", null, 2
+), ReminderSyncQueue {
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("""
             CREATE TABLE reminders (
@@ -31,9 +31,21 @@ internal class ReminderStore(context: Context) : SQLiteOpenHelper(
             )
         """.trimIndent())
         db.execSQL("CREATE INDEX reminders_schedule ON reminders(status, next_at)")
+        createSyncOutbox(db)
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) {
+            createSyncOutbox(db)
+            db.query(TABLE, null, null, null, null, null, "created_at ASC").use { cursor ->
+                while (cursor.moveToNext()) {
+                    val record = cursor.toReminder()
+                    if (record.status == STATUS_DELETED) enqueueDelete(db, record.id)
+                    else enqueueUpsert(db, record)
+                }
+            }
+        }
+    }
 
     @Synchronized
     fun create(message: String, atMillis: Long, recurrence: String, zoneId: String = TimeZone.getDefault().id): ReminderRecord {
@@ -47,7 +59,15 @@ internal class ReminderStore(context: Context) : SQLiteOpenHelper(
             createdAtMillis = now, updatedAtMillis = now, lastDeliveredAtMillis = null,
             nextAtMillis = atMillis, pendingAtMillis = null, attempts = 0, deliveryState = STATE_IDLE
         )
-        writableDatabase.insertOrThrow(TABLE, null, record.toValues())
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.insertOrThrow(TABLE, null, record.toValues())
+            enqueueUpsert(db, record)
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
         return record
     }
 
@@ -78,7 +98,7 @@ internal class ReminderStore(context: Context) : SQLiteOpenHelper(
             nextAtMillis = atMillis, pendingAtMillis = null, attempts = 0, deliveryState = STATE_IDLE,
             status = STATUS_SCHEDULED, updatedAtMillis = System.currentTimeMillis()
         )
-        writableDatabase.update(TABLE, updated.toValues(), "id = ?", arrayOf(id))
+        saveAndQueue(updated)
         return updated
     }
 
@@ -91,7 +111,7 @@ internal class ReminderStore(context: Context) : SQLiteOpenHelper(
         val next = current.pendingAtMillis ?: current.nextAtMillis
         val updated = current.copy(status = STATUS_SCHEDULED, nextAtMillis = next, pendingAtMillis = null,
             attempts = 0, deliveryState = STATE_IDLE, updatedAtMillis = System.currentTimeMillis())
-        writableDatabase.update(TABLE, updated.toValues(), "id = ?", arrayOf(id))
+        saveAndQueue(updated)
         return updated
     }
 
@@ -107,7 +127,7 @@ internal class ReminderStore(context: Context) : SQLiteOpenHelper(
             deliveryState = STATE_DEFERRED,
             updatedAtMillis = now
         )
-        writableDatabase.update(TABLE, updated.toValues(), "id = ?", arrayOf(id))
+        saveAndQueue(updated)
         return updated
     }
 
@@ -119,13 +139,26 @@ internal class ReminderStore(context: Context) : SQLiteOpenHelper(
 
     @Synchronized
     fun pauseAll(): Int {
-        val values = ContentValues().apply {
-            put("status", STATUS_PAUSED)
-            putNull("pending_at")
-            put("delivery_state", STATE_IDLE)
-            put("updated_at", System.currentTimeMillis())
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            val records = db.query(TABLE, null, "status = ?", arrayOf(STATUS_SCHEDULED), null, null, "created_at ASC").use { cursor ->
+                val found = ArrayList<ReminderRecord>(cursor.count)
+                while (cursor.moveToNext()) found += cursor.toReminder()
+                found
+            }
+            val updatedAt = System.currentTimeMillis()
+            records.forEach { record ->
+                val updated = record.copy(status = STATUS_PAUSED, pendingAtMillis = null,
+                    deliveryState = STATE_IDLE, updatedAtMillis = updatedAt)
+                db.update(TABLE, updated.toValues(), "id = ?", arrayOf(updated.id))
+                enqueueUpsert(db, updated)
+            }
+            db.setTransactionSuccessful()
+            return records.size
+        } finally {
+            db.endTransaction()
         }
-        return writableDatabase.update(TABLE, values, "status = ?", arrayOf(STATUS_SCHEDULED))
     }
 
     @Synchronized
@@ -185,7 +218,7 @@ internal class ReminderStore(context: Context) : SQLiteOpenHelper(
         if (current.pendingAtMillis != null && current.pendingAtMillis != scheduledAt) return null
         val updated = current.copy(pendingAtMillis = current.pendingAtMillis ?: scheduledAt, nextAtMillis = retryAt,
             deliveryState = STATE_DEFERRED, updatedAtMillis = System.currentTimeMillis())
-        writableDatabase.update(TABLE, updated.toValues(), "id = ?", arrayOf(id))
+        saveAndQueue(updated)
         return updated
     }
 
@@ -209,7 +242,7 @@ internal class ReminderStore(context: Context) : SQLiteOpenHelper(
             deliveryState = if (next == null) STATE_DONE else STATE_IDLE,
             updatedAtMillis = deliveredAt
         )
-        writableDatabase.update(TABLE, updated.toValues(), "id = ?", arrayOf(id))
+        saveAndQueue(updated)
         return updated
     }
 
@@ -223,8 +256,61 @@ internal class ReminderStore(context: Context) : SQLiteOpenHelper(
         val current = get(id) ?: return null
         val updated = current.copy(status = status, pendingAtMillis = if (clearPending) null else current.pendingAtMillis,
             deliveryState = STATE_IDLE, updatedAtMillis = System.currentTimeMillis())
-        writableDatabase.update(TABLE, updated.toValues(), "id = ?", arrayOf(id))
+        saveAndQueue(updated)
         return updated
+    }
+
+    private fun saveAndQueue(record: ReminderRecord) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.update(TABLE, record.toValues(), "id = ?", arrayOf(record.id))
+            if (record.status == STATUS_DELETED) enqueueDelete(db, record.id) else enqueueUpsert(db, record)
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    private fun enqueueUpsert(db: SQLiteDatabase, record: ReminderRecord) {
+        db.insertOrThrow(OUTBOX_TABLE, null, ContentValues().apply {
+            put("operation", "upsert")
+            put("reminder_id", record.id)
+            put("payload", record.toBackendJson().toString())
+        })
+    }
+
+    private fun enqueueDelete(db: SQLiteDatabase, id: String) {
+        db.insertOrThrow(OUTBOX_TABLE, null, ContentValues().apply {
+            put("operation", "delete")
+            put("reminder_id", id)
+            putNull("payload")
+        })
+    }
+
+    @Synchronized
+    override fun pendingSyncOperations(limit: Int): List<ReminderSyncOperation> = readableDatabase.query(
+        OUTBOX_TABLE, null, null, null, null, null, "sequence ASC", limit.coerceIn(1, 500).toString()
+    ).use { cursor ->
+        val operations = ArrayList<ReminderSyncOperation>(cursor.count)
+        while (cursor.moveToNext()) operations += ReminderSyncOperation(
+            sequence = cursor.getLong(cursor.getColumnIndexOrThrow("sequence")),
+            operation = cursor.getString(cursor.getColumnIndexOrThrow("operation")),
+            reminderId = cursor.getString(cursor.getColumnIndexOrThrow("reminder_id")),
+            payload = if (cursor.isNull(cursor.getColumnIndexOrThrow("payload"))) null
+                else cursor.getString(cursor.getColumnIndexOrThrow("payload"))
+        )
+        operations
+    }
+
+    @Synchronized
+    override fun acknowledgeSyncOperation(sequence: Long): Boolean = writableDatabase.delete(
+        OUTBOX_TABLE, "sequence = ?", arrayOf(sequence.toString())
+    ) == 1
+
+    @Synchronized
+    fun pendingSyncCount(): Int = readableDatabase.rawQuery("SELECT COUNT(*) FROM $OUTBOX_TABLE", null).use { cursor ->
+        if (cursor.moveToFirst()) cursor.getInt(0) else 0
     }
 
     private fun ReminderRecord.toValues() = ContentValues().apply {
@@ -247,8 +333,21 @@ internal class ReminderStore(context: Context) : SQLiteOpenHelper(
         attempts = getInt(getColumnIndexOrThrow("attempts")), deliveryState = getString(getColumnIndexOrThrow("delivery_state"))
     )
 
+    private fun createSyncOutbox(db: SQLiteDatabase) {
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS $OUTBOX_TABLE (
+              sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+              operation TEXT NOT NULL,
+              reminder_id TEXT NOT NULL,
+              payload TEXT
+            )
+        """.trimIndent())
+        db.execSQL("CREATE INDEX IF NOT EXISTS reminder_sync_order ON $OUTBOX_TABLE(sequence)")
+    }
+
     private companion object {
         const val TABLE = "reminders"
+        const val OUTBOX_TABLE = "reminder_sync_outbox"
         const val MAX_MESSAGE_LENGTH = 240
         const val MAX_RETRY_ATTEMPTS = 3
         const val PROCESSING_TIMEOUT_MS = 120_000L

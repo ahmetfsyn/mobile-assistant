@@ -27,7 +27,8 @@ internal class ReminderManagerDialog(
     private val scheduler: ReminderScheduler,
     private val onSettingsChanged: (ReminderSettings) -> Unit,
     private val syncReminder: (ReminderRecord, Boolean) -> Unit,
-    private val syncDelete: (String) -> Unit
+    private val syncDelete: (String) -> Unit,
+    private val onTestProactiveSpeech: () -> Unit
 ) {
     private var dialog: AlertDialog? = null
 
@@ -75,6 +76,11 @@ internal class ReminderManagerDialog(
         root.addView(list)
         val add = Button(activity).apply { text = "HATIRLATMA EKLE" }
         root.addView(add)
+        val testSpeech = Button(activity).apply {
+            text = "PROAKTİF SESİ TEST ET"
+            contentDescription = "Gerçek Türkçe konuşma çıkışını test et"
+        }
+        root.addView(testSpeech)
 
         fun applySettings() {
             settings = settings.copy(
@@ -88,6 +94,7 @@ internal class ReminderManagerDialog(
 
         fun renderList() {
             list.removeAllViews()
+            val displayZone = TimeZone.getDefault().id
             val reminders = store.list().filter { it.status != "deleted" }.take(25)
             if (reminders.isEmpty()) {
                 list.addView(TextView(activity).apply { text = "Henüz hatırlatma yok."; setTextColor(Color.GRAY) })
@@ -100,8 +107,8 @@ internal class ReminderManagerDialog(
                 }
                 val title = TextView(activity).apply {
                     val date = if (reminder.lastDeliveredAtMillis != null && reminder.status == "delivered")
-                        "Teslim edildi: ${ReminderTimePolicy.formatLocal(reminder.lastDeliveredAtMillis, reminder.timeZoneId)}"
-                    else "${ReminderTimePolicy.formatLocal(reminder.nextAtMillis, reminder.timeZoneId)} · ${reminder.recurrenceLabel()}"
+                        "Teslim edildi: ${ReminderTimePolicy.formatLocal(reminder.lastDeliveredAtMillis, displayZone)}"
+                    else "${ReminderTimePolicy.formatLocal(reminder.nextAtMillis, displayZone)} · ${reminder.recurrenceLabel()}"
                     text = "${reminder.message}\n$date · ${reminder.statusLabel()}"
                     setTextColor(Color.WHITE)
                 }
@@ -176,6 +183,10 @@ internal class ReminderManagerDialog(
             applySettings()
             dialog?.dismiss()
             showEditor(null)
+        }
+        testSpeech.setOnClickListener {
+            applySettings()
+            onTestProactiveSpeech()
         }
         renderList()
 

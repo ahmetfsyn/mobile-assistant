@@ -104,31 +104,6 @@ internal class ReminderCooldownStore(context: Context) {
     }
 }
 
-/** Persists background delivery sync work until the companion can reach its local backend again. */
-internal class PendingReminderSyncStore(context: Context) {
-    private val preferences = context.applicationContext.getSharedPreferences("companion_reminder_sync", Context.MODE_PRIVATE)
-
-    fun pendingIds(): Set<String> = synchronized(lock) {
-        preferences.getStringSet(KEY_PENDING_DELIVERIES, emptySet()).orEmpty().toSet()
-    }
-
-    fun markPending(id: String) = synchronized(lock) {
-        val ids = preferences.getStringSet(KEY_PENDING_DELIVERIES, emptySet()).orEmpty().toMutableSet()
-        ids.add(id)
-        preferences.edit().putStringSet(KEY_PENDING_DELIVERIES, ids).commit()
-    }
-
-    fun markSynced(id: String) = synchronized(lock) {
-        val ids = preferences.getStringSet(KEY_PENDING_DELIVERIES, emptySet()).orEmpty().toMutableSet()
-        if (ids.remove(id)) preferences.edit().putStringSet(KEY_PENDING_DELIVERIES, ids).commit()
-    }
-
-    private companion object {
-        const val KEY_PENDING_DELIVERIES = "pending_deliveries"
-        val lock = Any()
-    }
-}
-
 class ReminderAlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != ReminderScheduler.ACTION_REMINDER_ALARM) return
@@ -177,20 +152,22 @@ class ReminderAlarmReceiver : BroadcastReceiver() {
 
     private fun syncDeliveredReminder(context: Context, reminder: ReminderRecord) {
         if (BuildConfig.COMPANION_BACKEND_URL.isBlank()) return
-        val pendingSyncStore = PendingReminderSyncStore(context)
-        pendingSyncStore.markPending(reminder.id)
         val pendingResult = goAsync()
         Thread {
+            val syncStore = ReminderStore(context.applicationContext)
             try {
                 val tokenStore = CompanionAccessTokenStore(context.applicationContext)
-                ReminderApiClient(BuildConfig.COMPANION_BACKEND_URL, tokenStore::accessToken).update(reminder)
-                pendingSyncStore.markSynced(reminder.id)
-                Log.i("ReminderSync", "background_delivery_synced id=${reminder.id}")
+                val count = ReminderSyncDispatcher(
+                    syncStore,
+                    ReminderApiClient(BuildConfig.COMPANION_BACKEND_URL, tokenStore::accessToken)
+                ).flush()
+                Log.i("ReminderSync", "background_outbox_flushed count=$count pending=${syncStore.pendingSyncCount()}")
             } catch (error: Exception) {
                 val httpStatus = Regex("HTTP (\\d{3})").find(error.message.orEmpty())?.groupValues?.get(1)
                 val reason = httpStatus?.let { "http_$it" } ?: error.javaClass.simpleName
-                Log.w("ReminderSync", "background_delivery_sync_failed id=${reminder.id} reason=$reason")
+                Log.w("ReminderSync", "background_outbox_flush_failed reason=$reason")
             } finally {
+                syncStore.close()
                 pendingResult.finish()
             }
         }.start()
@@ -266,7 +243,15 @@ internal class ReminderCommandProcessor(
     private val syncDelete: (String) -> Unit = {}
 ) {
     fun process(transcript: String, nowMillis: Long = System.currentTimeMillis(), zoneId: String = TimeZone.getDefault().id): String? {
-        return when (val command = TurkishReminderCommandParser.parse(transcript, nowMillis, zoneId) ?: return null) {
+        val command = TurkishReminderCommandParser.parse(transcript, nowMillis, zoneId) ?: return null
+        if (command is ReminderCommand.Create) {
+            val clockFormat = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS Z z", java.util.Locale.US).apply {
+                timeZone = TimeZone.getTimeZone(zoneId)
+            }
+            Log.i("ReminderClock", "parsed nowEpoch=$nowMillis zone=$zoneId localNow=${clockFormat.format(nowMillis)} " +
+                "targetEpoch=${command.atMillis} localTarget=${clockFormat.format(command.atMillis)}")
+        }
+        return when (command) {
             is ReminderCommand.Clarify -> command.question
             is ReminderCommand.Create -> {
                 val record = try { store.create(command.message, command.atMillis, command.recurrence, zoneId) }
@@ -275,13 +260,13 @@ internal class ReminderCommandProcessor(
                 val settings = settingsStore.get()
                 if (settings.autonomyEnabled) scheduler.schedule(record)
                 val whenText = ReminderTimePolicy.formatLocal(record.nextAtMillis, zoneId)
-                if (settings.autonomyEnabled) "Tamam, ${record.message} için $whenText zamanında hatırlatacağım."
-                else "Hatırlatmayı $whenText için kaydettim. Teslim edilmesi için ayarlardan hatırlatmaları etkinleştirmen gerekiyor."
+                if (settings.autonomyEnabled) "Cihazıma kaydettim; ${record.message} için $whenText zamanında hatırlatacağım. Sunucu eşitlemesi bağlantı olduğunda tamamlanacak."
+                else "Hatırlatmayı cihazıma $whenText için kaydettim. Teslim edilmesi için ayarlardan hatırlatmaları etkinleştirmen gerekiyor. Sunucu eşitlemesi bağlantı olduğunda tamamlanacak."
             }
             ReminderCommand.List -> {
                 val reminders = store.list(includeCompleted = false).filter { it.status == "scheduled" || it.status == "paused" }.take(8)
                 if (reminders.isEmpty()) "Kayıtlı yaklaşan hatırlatman yok."
-                else reminders.joinToString(". ") { "${it.message}: ${ReminderTimePolicy.formatLocal(it.nextAtMillis, it.timeZoneId)}${if (it.status == "paused") ", duraklatıldı" else ""}" }
+                else reminders.joinToString(". ") { "${it.message}: ${ReminderTimePolicy.formatLocal(it.nextAtMillis, TimeZone.getDefault().id)}${if (it.status == "paused") ", duraklatıldı" else ""}" }
             }
             ReminderCommand.DisableAll -> {
                 val settings = settingsStore.get().copy(autonomyEnabled = false)

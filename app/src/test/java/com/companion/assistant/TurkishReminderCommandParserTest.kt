@@ -20,6 +20,69 @@ class TurkishReminderCommandParserTest {
     }
 
     @Test
+    fun twoMinutesAfterEightPmIsEightOhTwoInTwentyFourHourDisplay() {
+        val zone = TimeZone.getTimeZone("Europe/Istanbul")
+        val now = Calendar.getInstance(zone).apply {
+            set(2030, Calendar.JANUARY, 2, 20, 0, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+        val command = TurkishReminderCommandParser.parse("Bana 2 dakika sonra hatırlat.", now, zone.id)
+        assertTrue(command is ReminderCommand.Create)
+        command as ReminderCommand.Create
+        val target = Calendar.getInstance(zone).apply { timeInMillis = command.atMillis }
+        assertEquals(20, target.get(Calendar.HOUR_OF_DAY))
+        assertEquals(2, target.get(Calendar.MINUTE))
+        assertTrue(ReminderTimePolicy.formatLocal(command.atMillis, zone.id).endsWith("20:02"))
+    }
+
+    @Test
+    fun relativeReminderRollsAcrossDateAndMidnight() {
+        val zone = TimeZone.getTimeZone("Europe/Istanbul")
+        val now = Calendar.getInstance(zone).apply {
+            set(2030, Calendar.JANUARY, 2, 23, 59, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+        val command = TurkishReminderCommandParser.parse("2 dakika sonra beni hatırlat.", now, zone.id)
+        assertTrue(command is ReminderCommand.Create)
+        command as ReminderCommand.Create
+        val target = Calendar.getInstance(zone).apply { timeInMillis = command.atMillis }
+        assertEquals(3, target.get(Calendar.DAY_OF_MONTH))
+        assertEquals(0, target.get(Calendar.HOUR_OF_DAY))
+        assertEquals(1, target.get(Calendar.MINUTE))
+        assertTrue(ReminderTimePolicy.formatLocal(command.atMillis, zone.id).contains("00:01"))
+    }
+
+    @Test
+    fun relativeInstantIsStableAcrossTimezoneChangesAndDisplayUsesSelectedZone() {
+        val now = Calendar.getInstance(TimeZone.getTimeZone("Europe/Istanbul")).apply {
+            set(2030, Calendar.JANUARY, 2, 20, 0, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+        val istanbul = TurkishReminderCommandParser.parse("2 dakika sonra beni hatırlat.", now, "Europe/Istanbul") as ReminderCommand.Create
+        val utc = TurkishReminderCommandParser.parse("2 dakika sonra beni hatırlat.", now, "UTC") as ReminderCommand.Create
+        assertEquals(istanbul.atMillis, utc.atMillis)
+        assertTrue(ReminderTimePolicy.formatLocal(istanbul.atMillis, "Europe/Istanbul").endsWith("20:02"))
+        assertTrue(ReminderTimePolicy.formatLocal(utc.atMillis, "UTC").endsWith("17:02"))
+    }
+
+    @Test
+    fun absoluteTimeIsResolvedInTheSuppliedLocalTimezone() {
+        val now = Calendar.getInstance(TimeZone.getTimeZone("Europe/Istanbul")).apply {
+            set(2030, Calendar.JANUARY, 2, 20, 0, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+        val istanbul = TurkishReminderCommandParser.parse("Saat 20:02'de beni hatırlat.", now, "Europe/Istanbul")
+        val utc = TurkishReminderCommandParser.parse("Saat 20:02'de beni hatırlat.", now, "UTC")
+        assertTrue(istanbul is ReminderCommand.Create)
+        assertTrue(utc is ReminderCommand.Create)
+        istanbul as ReminderCommand.Create
+        utc as ReminderCommand.Create
+        assertTrue(istanbul.atMillis != utc.atMillis)
+        assertTrue(ReminderTimePolicy.formatLocal(istanbul.atMillis, "Europe/Istanbul").endsWith("20:02"))
+        assertTrue(ReminderTimePolicy.formatLocal(utc.atMillis, "UTC").endsWith("20:02"))
+    }
+
+    @Test
     fun parsesTomorrowAndDailyTurkishSchedulesInLocalTime() {
         val zone = TimeZone.getTimeZone("Europe/Istanbul")
         val now = Calendar.getInstance(zone).apply {
