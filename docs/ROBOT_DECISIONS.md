@@ -18,11 +18,13 @@ Status: D-01 is implemented as a limited Android state foundation and D-04 has a
 | D-12 | No mandatory paid service or hardware for the **phone + owned Mac** companion. Gemini is optional under available free quota; unavailable quota means local degradation, not automatic billing/provider substitution. | Paid plans may be offered explicitly later, never required for baseline. Physical ESP32/motor parts have unavoidable up-front cost unless owned. |
 | D-13 | ESP32 owns safety-critical stop, range, speed, and watchdog; the backend sends bounded named targets and Android reports verified outcomes. | Phone/backend-only emergency stop fails on Wi-Fi/host loss. Revisit a motor design only after mechanical and electrical testing, not through AI behavior changes. |
 | D-14 | Version new API capabilities without breaking existing `/v1` clients. Keep request IDs and normalized errors; use `/v2` for incompatible envelopes. | A wholesale API replacement risks the working Android–Gemini path. Revisit when a concrete incompatible requirement exists. |
+| D-15 | The only requested wake phrase is the exact Turkish **`Ayşe`**. For a free offline prototype, evaluate Vosk with `vosk-model-small-tr-0.3` and a constrained grammar first; this is a candidate, not a supported feature. Keep `RobotCore` as the sole interaction-state authority and require explicit microphone opt-in. | Vosk is Turkish-capable general ASR, not a dedicated KWS, and its exact `Ayşe` vocabulary/rejection behavior is unverified. If physical false-accept or resource gates fail, investigate local Turkish model training; do not substitute a phrase or silently switch to cloud. See [Phase 7.1 decision](PHASE7_WAKE_WORD_DECISION.md). |
 
 ## Current gaps that must not be hidden by planning language
 
 - Robot Core is a small state/effect foundation. It does not yet own FaceBehavior's autonomous eye/sleep timers or perform actions/observations. The memory consent preference is persisted locally by `MemoryConsentStore`, outside the reducer.
 - The default Android platform STT adapter is implemented, but actual Turkish recognition, installed service availability, and Wi-Fi-off behavior are unverified on the GM 5 Plus. No current backend STT route exists.
+- Wake-word detection is not implemented. The face's timed sleep behavior is separate from `RobotCore`; there is no persistent microphone service, wake-word setting, or standby notification. No physical detection of `Ayşe` has been verified.
 - The backend uses one shared SQLite file for opt-in structured memory; it has no per-device identity/isolation, encryption at rest, autonomous scheduler, tool executor, or hardware gateway.
 - The Android app has no camera permission or vision pipeline. Current face idle behavior is local character animation, not environment-aware autonomy.
 - Current local Compose chooses `gemini-3.5-flash-lite`; bare backend configuration defaults to `gemini-2.5-flash`. Both are external services whose free-tier rules may change. The Android build with no backend URL uses a mock conversation reply.
@@ -32,6 +34,7 @@ Status: D-01 is implemented as a limited Android state foundation and D-04 has a
 
 | Question | Required evidence before committing to implementation |
 | --- | --- |
+| Can a free offline detector recognize the exact Turkish wake word `Ayşe` without frequent false triggers on this GM 5 Plus? | First test Vosk's Turkish small model with exact Unicode spelling and a constrained grammar; confirm the word is supported and unrelated speech is rejected. Measure misses, false wakes/hour, CPU, peak RAM, latency, battery, and temperature on-device before selecting it for production. |
 | Which Turkish STT is actually usable on this GM 5 Plus? | Detect installed recognition service and Turkish language data; compare Wi-Fi-on/off transcripts/latency. If unavailable or network-only, benchmark Vosk 35 MB small Turkish model on the device, including peak RAM and battery. |
 | Is the installed Turkish TTS voice offline and clear enough? | Enumerate voices and check network requirement; test airplane mode, speaker routing, interruption, and long reply clipping. |
 | Does the phone's camera see a useful desk scene when mounted horizontally? | Photograph/test field of view with explicit consent; measure frame acquisition heat and battery before person detection plans. |

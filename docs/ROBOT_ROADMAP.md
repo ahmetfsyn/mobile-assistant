@@ -1,6 +1,6 @@
 # Phased Robot Roadmap
 
-This roadmap is a sequence of **small, separately reversible deliveries**, not authorization to implement them all. Complexity is a rough one-engineer estimate after the specified dependencies are available; device-specific investigation and hardware procurement can dominate it. Every phase keeps the existing face, tap-to-talk, provider-neutral backend, local Docker route, Turkish default, and API 24 build working. Phase 1 is implemented. Phase 2's platform adapter is implemented, with physical-device acceptance still open. Phase 4's local personality/emotion implementation is in place and the face was visually reviewed on the GM 5 Plus (API 25); spoken-quality review remains open. Phase 5 has an initial consent-gated SQLite memory implementation; per-device isolation, encrypted local transport/storage, export, and automatic summaries remain open. Phase 6 now has an initial local reminder and controlled-delivery implementation; physical-device alarm acceptance remains open. Phase 3 reliability soak and phases 7–10 remain planned.
+This roadmap is a sequence of **small, separately reversible deliveries**, not authorization to implement them all. Complexity is a rough one-engineer estimate after the specified dependencies are available; device-specific investigation and hardware procurement can dominate it. Every phase keeps the existing face, tap-to-talk, provider-neutral backend, local Docker route, Turkish default, and API 24 build working. Phase 1 is implemented. Phase 2's platform adapter is implemented, with physical-device acceptance still open. Phase 4's local personality/emotion implementation is in place and the face was visually reviewed on the GM 5 Plus (API 25); spoken-quality review remains open. Phase 5 has an initial consent-gated SQLite memory implementation; per-device isolation, encrypted local transport/storage, export, and automatic summaries remain open. Phase 6 now has an initial local reminder and controlled-delivery implementation; physical-device alarm acceptance remains open. Phase 7.1 is an architecture investigation only; sleeping-face work, local wake detection, and phases 8–11 remain planned.
 
 ## Priority and gates
 
@@ -14,10 +14,11 @@ This roadmap is a sequence of **small, separately reversible deliveries**, not a
 | 4 | Personality and bounded emotion — implemented; device review open | Medium, ~1–2 weeks | No | Yes locally; Gemini usage remains quota-dependent |
 | 5 | Consent-gated persistent memory — initial version implemented | High, ~2–4 weeks | No; backup storage optional | Yes locally |
 | 6 | Controlled autonomy and reminders — initial implementation in place; device acceptance open | High, ~2–3 weeks | No | Yes; local schedule, no background AI loop |
-| 7 | Opt-in vision | High, ~2–4 weeks | No if phone camera geometry works | Yes for basic motion; ML may need host resources |
-| 8 | ESP32 sensor integration | High, ~2–4 weeks | Yes unless owned | Yes ongoing, **not zero up-front** |
-| 9 | Physical body and safe motors | Very high, ~4–8+ weeks | Yes | No zero-up-front claim; software may remain free |
-| 10 | Advanced tools and autonomy | Very high, iterative | Depends on tools | Only with local/owned services and hard cloud-call budget |
+| 7 | Local wake word and sleeping face — 7.1 decision documented; detection unimplemented | High, staged across 7.1–7.5 | No | Yes with local engine/model; device-resource acceptance is open |
+| 8 | Opt-in vision | High, ~2–4 weeks | No if phone camera geometry works | Yes for basic motion; ML may need host resources |
+| 9 | ESP32 sensor integration | High, ~2–4 weeks | Yes unless owned | Yes ongoing, **not zero up-front** |
+| 10 | Physical body and safe motors | Very high, ~4–8+ weeks | Yes | No zero-up-front claim; software may remain free |
+| 11 | Advanced tools and autonomy | Very high, iterative | Depends on tools | Only with local/owned services and hard cloud-call budget |
 
 ## Phase 1 — Architecture foundation
 
@@ -71,28 +72,39 @@ Android consent defaults off and is sent on each conversation request. When enab
 - **Limitations:** Android may defer inexact alarms and some manufacturers apply extra battery restrictions. These behaviors need a physical-device test; the app does not use a permanent service or hold a wake lock between alarms.
 - **Details and manual procedure:** [Phase 6 reminders](PHASE6_REMINDERS.md).
 
-## Phase 7 — Opt-in vision and environmental perception
+## Phase 7 — Local wake word and sleeping robot face
+
+- **Canonical phrase:** `Ayşe`, spelled with Turkish `ş`. Do not substitute or transliterate it. Suggested settings label: `Uyandırma sözcüğü: Ayşe`.
+- **7.1 — Investigation and architecture (documented only):** Current microphone/STT ownership, independent face/Core sleep state, engine options, provisional candidate, mic hand-off, privacy boundaries, and device acceptance plan are recorded in [Phase 7.1 decision](PHASE7_WAKE_WORD_DECISION.md). No wake listener, permission flow, setting, or support claim has been added.
+- **7.2 — Sleeping face:** Connect the existing Canvas face to Core activity state and add a low-cost wake/open and return/close transition. Preserve touch interaction and measure standby redraw cost.
+- **7.3 — Local detector:** Prototype the Turkish Vosk small model with an exact `Ayşe` constrained grammar behind explicit opt-in and a foreground notification. This is only a candidate; verify vocabulary support, rejection behavior, false activations, latency, RAM, and CPU on the GM 5 Plus before proceeding. If it fails, investigate local custom Turkish training rather than changing the phrase.
+- **7.4 — STT hand-off:** Make the detector stop and release capture before existing Turkish STT starts; resume only after TTS, silence timeout, or recoverable failure and only if opt-in/permission remain valid.
+- **7.5 — Lifecycle and endurance:** Test app pause/background, screen off, reboot, permission revocation, service recovery, privacy/no-upload behavior, and prolonged standby. Measure false-accepts/hour, misses, latency, peak RAM, CPU, battery, and temperature on the physical device.
+- **Acceptance/testing:** Automated state and mic-ownership tests use mocked audio; they do not prove wake recognition. Physical testing must include multiple Turkish speakers saying exactly `Ayşe`, ordinary conversation/TV/music/silence negative cases, duplicate suppression, and a sustained false-activation soak. No wake-word measurement is available yet.
+- **Risk/cost:** A short common name may false-trigger; Vosk is ASR constrained by grammar, not a dedicated KWS, and runtime RAM may be significant. Keep monitoring disabled by default until the user explicitly enables it and the device gates pass.
+
+## Phase 8 — Opt-in vision and environmental perception
 
 - **Objective/modules:** Explicit short camera sessions; downscaled low-rate motion detection; optional, clearly labeled person/object detection if phone and host benchmarks support it. No always-on camera.
 - **Dependencies/expected components:** Camera permission/indicator and authenticated transport if frames leave phone; `VisionSession`, frame sampler, quality/staleness types, optional host inference adapter. Check stand field of view first.
 - **Acceptance/testing:** Camera opens only with consent; indicator remains visible; frames are discarded by default; revoke/background closes camera; heat, CPU, battery, and false-alert rate measured on GM 5 Plus; no identity claim from simple motion. Manual camera/privacy tests plus synthetic-frame tests.
 - **Risk/cost:** Heat, battery, lens geometry, privacy, false detections. High; basic local motion 0 TL if phone camera suffices; optional hardware/model costs vary.
 
-## Phase 8 — ESP32 sensor bridge
+## Phase 9 — ESP32 sensor bridge
 
 - **Objective/modules:** Read a physical button and one sensor through an authenticated gateway, present staleness/quality, and add a local physical stop input. **No motor yet.**
 - **Dependencies/expected components:** ESP32 board/sensor/power, firmware repository area (proposed `hardware/esp32/`), backend `HardwareGateway`, pairing/protocol tests, Android event adapter; Phase 1 Core and security gate.
 - **Acceptance/testing:** Sensor events have sequence and expiry; disconnect/reconnect and malformed/replayed messages fail safely; no public port exposure; stop remains effective when Mac/phone vanish. Device-in-loop tests and packet/fault injection.
 - **Risk/cost:** Wi-Fi reliability, firmware updates, supply noise. High; nonzero up-front parts cost unless already owned.
 
-## Phase 9 — Physical body and safe motor control
+## Phase 10 — Physical body and safe motor control
 
 - **Objective/modules:** Enclosure, one bounded servo, driver and independent power, physical latched stop, watchdog, then optional additional axes. AI only proposes named high-level actions.
-- **Dependencies/expected components:** Phase 8 trusted gateway, mechanical/electrical design, selected servo supply, hard limits and firmware safety state. See [hardware plan](ROBOT_HARDWARE_PLAN.md).
+- **Dependencies/expected components:** Phase 9 trusted gateway, mechanical/electrical design, selected servo supply, hard limits and firmware safety state. See [hardware plan](ROBOT_HARDWARE_PLAN.md).
 - **Acceptance/testing:** Out-of-range/stale/replayed command rejected; stop works during motion and without network; brownout/overcurrent/stall and tip/pinch tests pass; Android reports completion only after verified result; motor cannot restart after stop without local re-arm.
 - **Risk/cost:** Injury/electrical damage and substantial mechanical effort. Very high; hardware purchases mean not a literal 0 TL build.
 
-## Phase 10 — Advanced autonomy and tool usage
+## Phase 11 — Advanced autonomy and tool usage
 
 - **Objective/modules:** Add allowlisted read/time/sensor/reminder tools first, then carefully scoped actions; optional local LLM and multi-sensor context. Require permission and typed validation for every effect.
 - **Dependencies/expected components:** Core, authenticated backend, memory privacy, reliable action audit, hardware safety where used; `ToolRegistry`, `ToolPolicy`, `ToolExecutor`, replay-safe command store.

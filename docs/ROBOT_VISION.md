@@ -9,11 +9,12 @@ The General Mobile GM 5 Plus is the first face, microphone, speaker, and interac
 ## Experience goals
 
 1. **Reliable Turkish turn-taking.** Tap to talk; visible listening, thinking, and speaking states; interruption works; captions and a clear error appear when a service is unavailable. English is an explicit option, never an automatic switch.
-2. **Character with restraint.** Eyes blink and gaze naturally. A bounded emotion model adjusts the face and delivery; it does not pretend to have human feelings or invent memories.
-3. **Useful continuity.** Remember only consented, relevant preferences and events. Give the user a way to inspect, correct, export, and delete them. Do not retain microphone audio by default.
-4. **Appropriate initiative.** Local schedules and sensor events can suggest a greeting or reminder within quiet hours, rate limits, and consent. Silence is a valid decision. No unattended model call loop.
-5. **Physical trust.** Optional movement is slow, bounded, and interruptible. A hardware stop and ESP32 watchdog take priority over phone, backend, and model instructions.
-6. **Graceful degradation.** With the Mac or internet off, retain the face, touch, basic local states, available on-device voice features, and safe stop. Never claim an unavailable cloud or hardware action succeeded.
+2. **Explicit local wake-up (planned).** If wake-word monitoring is later enabled, its exact Turkish phrase is `Ayşe`. Standby audio stays on-device and is not uploaded; monitoring is opt-in and visibly indicated. The feature is not implemented or physically verified yet.
+3. **Character with restraint.** Eyes blink and gaze naturally. A bounded emotion model adjusts the face and delivery; it does not pretend to have human feelings or invent memories.
+4. **Useful continuity.** Remember only consented, relevant preferences and events. Give the user a way to inspect, correct, export, and delete them. Do not retain microphone audio by default.
+5. **Appropriate initiative.** Local schedules and sensor events can suggest a greeting or reminder within quiet hours, rate limits, and consent. Silence is a valid decision. No unattended model call loop.
+6. **Physical trust.** Optional movement is slow, bounded, and interruptible. A hardware stop and ESP32 watchdog take priority over phone, backend, and model instructions.
+7. **Graceful degradation.** With the Mac or internet off, retain the face, touch, basic local states, available on-device voice features, and safe stop. Never claim an unavailable cloud or hardware action succeeded.
 
 ## Hard boundaries
 
@@ -41,6 +42,8 @@ The General Mobile GM 5 Plus is the first face, microphone, speaker, and interac
 | Hardware/vision/tools | Audio output diagnostic screen exists. Camera pipeline, ESP32 integration, actuators, and general tool executor remain unimplemented. |
 
 Phase 1 and the initial Phase 6 reminder foundation are implemented. `RobotCore` owns voice and proactive-speech states; reminder commands are parsed from the current transcript, persisted locally, and scheduled without background AI. The rest of the future modules and safety controls described in the other documents remain proposals; physical reminder lifecycle acceptance is still open.
+
+Wake-word status: no wake listener, monitoring setting, or notification exists in the app. The desired future label is `Uyandırma sözcüğü: Ayşe`; it must also show whether local microphone monitoring is active. Phase 7.1 documents a candidate and acceptance gates only; it does not claim that the GM 5 Plus can detect this phrase.
 
 ## Success measures
 
