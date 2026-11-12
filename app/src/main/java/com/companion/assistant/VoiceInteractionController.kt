@@ -32,6 +32,7 @@ internal class VoiceInteractionController(
     @Volatile private var closed = false
     @Volatile private var activeSessionId: Long? = null
     @Volatile private var activeInteractionId: String? = null
+    @Volatile private var activeMicrophoneLease: MicrophoneOwnership.Lease? = null
     private var recognitionTask: Future<*>? = null
     private var activeRecording: AudioRecording? = null
     private val emotionReducer = EmotionReducer()
@@ -58,17 +59,27 @@ internal class VoiceInteractionController(
         val language = languageProvider()
         Log.i(TAG, "recognition_session_started interactionId=$interactionId session=$sessionId language=${language.tag}")
 
+        val microphoneLease = MicrophoneOwnership.acquire(MicrophoneOwnership.Owner.PUSH_TO_TALK)
+        if (microphoneLease == null) {
+            reportFailure(sessionId, "MIKROFON BAŞKA BİR İŞLEM TARAFINDAN KULLANILIYOR")
+            return
+        }
+        activeMicrophoneLease = microphoneLease
+
         try {
             speechInput.startListening(sessionId, language, object : SpeechInput.Callback {
                 override fun onRecordingReady(sessionId: Long, recording: AudioRecording) {
+                    releaseMicrophoneLease(microphoneLease)
                     dispatchOnMain { onRecordingReady(sessionId, language, interactionId, recording) }
                 }
 
                 override fun onTranscriptReady(sessionId: Long, transcript: String) {
+                    releaseMicrophoneLease(microphoneLease)
                     dispatchOnMain { onTranscriptReady(sessionId, language, interactionId, transcript) }
                 }
 
                 override fun onError(sessionId: Long, message: String) {
+                    releaseMicrophoneLease(microphoneLease)
                     dispatchOnMain {
                         Log.w(TAG, "recognition_failed interactionId=$interactionId session=$sessionId")
                         reportFailure(sessionId, message)
@@ -76,6 +87,7 @@ internal class VoiceInteractionController(
                 }
             })
         } catch (error: Exception) {
+            releaseMicrophoneLease(microphoneLease)
             Log.w(TAG, "Ses tanıma başlatılamadı: tür=${error.javaClass.simpleName}")
             reportFailure(sessionId, "KONUŞMA TANIMA SERVİSİ BAŞLATILAMADI")
         }
@@ -89,6 +101,7 @@ internal class VoiceInteractionController(
         if (activeSessionId != sessionId) return
         Log.i(TAG, "interaction_cancelled interactionId=${activeInteractionId ?: "unknown"} session=$sessionId")
         speechInput.cancel()
+        releaseActiveMicrophoneLease()
         recognitionTask?.cancel(true)
         recognitionTask = null
         activeRecording?.close()
@@ -365,6 +378,7 @@ internal class VoiceInteractionController(
         Log.w(TAG, "interaction_failed interactionId=${activeInteractionId ?: "unknown"} session=$session")
         applyEmotionEvent(EmotionEvent.INTERACTION_FAILED, scheduleDecay = true)
         speechInput.cancel()
+        releaseActiveMicrophoneLease()
         recognitionTask?.cancel(true)
         recognitionTask = null
         activeRecording?.close()
@@ -378,6 +392,7 @@ internal class VoiceInteractionController(
 
     private fun cancelSessionOnClose(sessionId: Long) {
         speechInput.cancel()
+        releaseActiveMicrophoneLease()
         recognitionTask?.cancel(true)
         recognitionTask = null
         activeRecording?.close()
@@ -392,6 +407,15 @@ internal class VoiceInteractionController(
     private fun dispatchOnMain(block: () -> Unit) {
         if (Looper.myLooper() == Looper.getMainLooper()) block()
         else mainHandler.post(block)
+    }
+
+    private fun releaseMicrophoneLease(lease: MicrophoneOwnership.Lease) {
+        lease.close()
+        if (activeMicrophoneLease === lease) activeMicrophoneLease = null
+    }
+
+    private fun releaseActiveMicrophoneLease() {
+        activeMicrophoneLease?.let(::releaseMicrophoneLease)
     }
 
     private fun applyEmotionEvent(event: EmotionEvent, scheduleDecay: Boolean = false) {

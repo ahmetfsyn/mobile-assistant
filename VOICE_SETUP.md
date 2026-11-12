@@ -17,6 +17,16 @@ Tanıma ve sohbet ağ işlemleri ana iş parçacığının dışında yürür. Y
 
 TTS, Android `AudioManager` üzerinden geçici ses odağı alır ve konuşma tamamlandığında, iptal edildiğinde veya uygulama kapanırken odağı bırakır. Başka bir uygulama geçici ya da kalıcı ses odağı kaybına neden olursa TTS durdurulur ve kullanıcıya ayrı bir ses odağı hatası gösterilir. `RobotCore` ile `VoiceInteractionController`, mikrofon tanıma ve TTS aşamalarını sıralı tutar; tanıma tamamlanmadan yanıt sesi başlamaz. Ham ses saklanmaz; son sekiz metin mesajı uygulama özelindeki SharedPreferences alanında tutulur. Uygulama verisini silmek yerel geçmişi de siler.
 
+## Yerel “Ayşe” uyandırma sözcüğü (Phase 7.3)
+
+Ayarlar > **GÜVENLİK VE GİZLİLİK** bölümünde “Ayşe ile yerel uyandırmayı etkinleştir” seçeneği varsayılan olarak kapalıdır. Açarken Android mikrofon iznini sorar. Açıkken sürekli yerel dinlemeyi bildiren kalıcı bir bildirim görünür; bildirimin **DİNLEMEYİ DURDUR** eylemi veya ayar ekranındaki durdurma düğmesi izni kapatır.
+
+Türkçe `Ayşe` sözcüğü Vosk modeliyle cihazda işlenir. Ham ses saklanmaz, backend'e veya Gemini'ye gönderilmez. İlk açılışta model hazırlanması birkaç saniye sürebilir; model yaklaşık 35 MB indirilmiş APK alanı ve yaklaşık 58.8 MB açılmış uygulama verisi kullanır. Uygulama ayarları ayrıca dinleme sırasında belleğin artabileceğini gösterir.
+
+`Ayşe` algılanınca robot gözlerini açıp **UYANDIM · DOKUN VE KONUŞ** durumuna geçer. Bu aşamada konuşma tanıma otomatik başlamaz. Yüze sonradan dokunmak mevcut push-to-talk akışını başlatır. Phase 7.3'te mikrofon dinlemesi konuşma/TTS sonrasında otomatik yeniden başlamaz; ayarlarda seçeneği kapatıp tekrar açarak elle yeniden etkinleştirin.
+
+GM 5 Plus'ta bir gerçek mikrofon wake olayı gözlendi. Bu tek deneme başarı oranını, benzer sözcüklerde yanlış uyanmayı, CPU/batarya etkisini veya uzun süreli kararlılığı doğrulamaz. Ayrıntılar ve açık cihaz testleri [`docs/PHASE7_3_AYSE_WAKE_WORD.md`](docs/PHASE7_3_AYSE_WAKE_WORD.md) içinde tutulur.
+
 ## Bulut backend'i
 
 Bağımsız Node.js servisi `backend/` klasöründedir; üçüncü taraf npm paketi gerektirmez. Mac'te Docker Compose ile yerel kullanım ve Android'in aynı Wi-Fi üzerinden bağlanması için [`LOCAL_DOCKER_BACKEND.md`](LOCAL_DOCKER_BACKEND.md), sağlayıcı ayarları için [`backend/README.md`](backend/README.md), Oracle Cloud Ubuntu Docker dağıtımı için [`ORACLE_CLOUD_DEPLOYMENT.md`](ORACLE_CLOUD_DEPLOYMENT.md) dosyasına bakın.

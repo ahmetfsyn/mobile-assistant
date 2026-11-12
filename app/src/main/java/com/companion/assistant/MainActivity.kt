@@ -42,9 +42,15 @@ class MainActivity : Activity() {
     private var memoryApiClient: MemoryApiClient? = null
     private var reminderStore: ReminderStore? = null
     private var reminderSettingsStore: ReminderSettingsStore? = null
+    private var wakeWordSettingsStore: WakeWordSettingsStore? = null
     private var reminderScheduler: ReminderScheduler? = null
     private var reminderApiClient: ReminderApiClient? = null
     private var reminderManagerDialog: ReminderManagerDialog? = null
+    private var wakeWordEnabledCheckBox: CheckBox? = null
+    private var wakeWordStatusText: TextView? = null
+    private var wakeWordReceiverRegistered = false
+    private var wakeWordPermissionRequestPending = false
+    private var updatingWakeWordCheckBox = false
     private var reminderReceiverRegistered = false
     private var reminderNetworkCallback: ConnectivityManager.NetworkCallback? = null
     private var pendingReminderNotificationId: String? = null
@@ -64,6 +70,28 @@ class MainActivity : Activity() {
     }
     private val reminderDueReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) = handleReminderDue(intent)
+    }
+    private val wakeWordReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.action) {
+                WakeWordService.ACTION_STATE_CHANGED -> {
+                    val enabled = wakeWordSettingsStore?.isEnabled() == true
+                    if (robotCore?.snapshot?.consent?.wakeWordMonitoringEnabled != enabled) {
+                        dispatchRobotEvent(RobotEvent.WakeWordMonitoringChanged(enabled))
+                    }
+                    refreshWakeWordControls()
+                }
+                WakeWordService.ACTION_WAKE_DETECTED -> {
+                    val generation = intent.getLongExtra(WakeWordService.EXTRA_GENERATION, -1L)
+                    val settings = wakeWordSettingsStore ?: return
+                    if (!settings.isEnabled() || settings.generation() != generation) return
+                    wakeWordSettingsStore?.setStatus(WakeWordStatus.DETECTED)
+                    wakeWordSettingsStore?.consumeWakeEventPending()
+                    refreshWakeWordControls()
+                    dispatchRobotEvent(RobotEvent.WakeWordDetected)
+                }
+            }
+        }
     }
     private val dismissRobotError = Runnable {
         val snapshot = robotCore?.snapshot ?: return@Runnable
@@ -101,13 +129,16 @@ class MainActivity : Activity() {
         memoryApiClient = MemoryApiClient(BuildConfig.COMPANION_BACKEND_URL, tokenStore::accessToken)
         val reminders = ReminderStore(applicationContext)
         val reminderSettings = ReminderSettingsStore(applicationContext)
+        val wakeWordSettings = WakeWordSettingsStore(applicationContext)
         val scheduler = ReminderScheduler(applicationContext, reminders)
         val reminderApi = ReminderApiClient(BuildConfig.COMPANION_BACKEND_URL, tokenStore::accessToken)
         reminderStore = reminders
         reminderSettingsStore = reminderSettings
+        wakeWordSettingsStore = wakeWordSettings
         reminderScheduler = scheduler
         reminderApiClient = reminderApi
         core.dispatch(RobotEvent.PersistentMemoryConsentChanged(consentStore.isEnabled()))
+        core.dispatch(RobotEvent.WakeWordMonitoringChanged(wakeWordSettings.isEnabled()))
         val startupReminderSettings = reminderSettings.prepareForBuildDefaults(
             BuildConfig.PHASE6_MANUAL_TEST_DEFAULTS
         )
@@ -170,6 +201,17 @@ class MainActivity : Activity() {
         reminderSettingsStore?.get()?.let(::applyReminderSettingsToRobot)
         reminderStore?.recoverDue()?.forEach { reminderScheduler?.schedule(it) }
         reminderScheduler?.scheduleAll()
+        registerWakeWordReceiver()
+        val pendingWakeGeneration = wakeWordSettingsStore?.consumeWakeEventPending()
+        if (pendingWakeGeneration != null &&
+            wakeWordSettingsStore?.isEnabled() == true &&
+            wakeWordSettingsStore?.generation() == pendingWakeGeneration
+        ) {
+            wakeWordSettingsStore?.setStatus(WakeWordStatus.DETECTED)
+            dispatchRobotEvent(RobotEvent.WakeWordDetected)
+        } else {
+            ensureWakeWordServiceForOptIn()
+        }
         retryPendingReminderSyncs()
         faceView?.start()
         mainHandler.post(::speakPendingReminderNotification)
@@ -184,6 +226,7 @@ class MainActivity : Activity() {
         ReminderHost.isVisible = false
         unregisterReminderReceiver()
         unregisterReminderNetworkCallback()
+        unregisterWakeWordReceiver()
         mainHandler.removeCallbacks(reminderSyncRetry)
         dispatchRobotEvent(RobotEvent.HostPaused)
         faceView?.stop()
@@ -196,14 +239,25 @@ class MainActivity : Activity() {
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode != REQUEST_MICROPHONE) return
-        microphonePermissionRequestPending = false
-
-        dispatchRobotEvent(
-            RobotEvent.MicrophonePermissionChanged(
-                grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
-            )
-        )
+        when (requestCode) {
+            REQUEST_MICROPHONE -> {
+                microphonePermissionRequestPending = false
+                dispatchRobotEvent(RobotEvent.MicrophonePermissionChanged(
+                    grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+                ))
+            }
+            REQUEST_WAKE_WORD_MICROPHONE -> {
+                wakeWordPermissionRequestPending = false
+                val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+                dispatchRobotEvent(RobotEvent.MicrophonePermissionChanged(granted))
+                if (granted) {
+                    enableWakeWordMonitoring()
+                } else {
+                    setWakeWordCheckBoxChecked(false)
+                    Toast.makeText(this, "Uyandırma için mikrofon izni gerekli.", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
     }
 
     override fun onDestroy() {
@@ -214,6 +268,7 @@ class MainActivity : Activity() {
         reminderManagerDialog?.dismiss()
         reminderManagerDialog = null
         unregisterReminderNetworkCallback()
+        unregisterWakeWordReceiver()
         dispatchRobotEvent(RobotEvent.CloseRequested)
         voiceController?.close()
         voiceController = null
@@ -226,6 +281,9 @@ class MainActivity : Activity() {
         reminderScheduler = null
         reminderStore = null
         reminderSettingsStore = null
+        wakeWordSettingsStore = null
+        wakeWordEnabledCheckBox = null
+        wakeWordStatusText = null
         mainHandler.removeCallbacksAndMessages(null)
         robotCore = null
         faceView?.destroy()
@@ -239,6 +297,7 @@ class MainActivity : Activity() {
     }
 
     private fun onFaceTapped() {
+        pauseWakeWordMonitoringForInteraction()
         dispatchRobotEvent(RobotEvent.FaceTapped)
     }
 
@@ -274,6 +333,25 @@ class MainActivity : Activity() {
             isChecked = consentStore.isEnabled()
             contentDescription = "Uzun süreli hafızayı etkinleştir"
         }
+        val wakeWordDetails = TextView(this).apply {
+            text = "Uyandırma sözcüğü: Ayşe. Açıkken mikrofon sesi yalnızca telefonda işlenir; ses kaydedilmez veya ağa gönderilmez. Yerel Türkçe model yaklaşık 35 MB'tır ve dinleme sırasında belleği artırabilir."
+            setPadding(0, (16f * resources.displayMetrics.density).toInt(), 0, (4f * resources.displayMetrics.density).toInt())
+        }
+        val wakeWordToggle = CheckBox(this).apply {
+            text = "Ayşe ile yerel uyandırmayı etkinleştir"
+            contentDescription = "Ayşe uyandırma sözcüğüyle yerel mikrofon dinlemeyi etkinleştir"
+            isChecked = wakeWordSettingsStore?.isEnabled() == true
+            setOnCheckedChangeListener { _, checked -> if (!updatingWakeWordCheckBox) onWakeWordSettingToggled(checked) }
+        }
+        val wakeWordStatus = TextView(this).apply {
+            text = wakeWordStatusLabel()
+            contentDescription = "Ayşe mikrofon dinleme durumu: $text"
+        }
+        val stopWakeWord = Button(this).apply {
+            text = "AYŞE DİNLEMESİNİ DURDUR"
+            contentDescription = "Ayşe uyandırma sözcüğü dinlemesini hemen durdur"
+            setOnClickListener { disableWakeWordMonitoring() }
+        }
         val memoryDetails = TextView(this).apply {
             text = "Açıldığında seçilen anılar yerel backend'de saklanır ve yanıt için yapılandırılmış AI sağlayıcısına gönderilebilir. Kapatmak yeni kayıt ve AI kullanımını durdurur; mevcut kayıtları silmez. Son sekiz sohbet mesajı Android'de tutulur."
             setPadding(0, (4f * resources.displayMetrics.density).toInt(), 0, 0)
@@ -298,6 +376,10 @@ class MainActivity : Activity() {
         content.addView(tokenInput)
         content.addView(memoryConsent)
         content.addView(memoryDetails)
+        content.addView(wakeWordDetails)
+        content.addView(wakeWordToggle)
+        content.addView(wakeWordStatus)
+        content.addView(stopWakeWord)
         content.addView(memoryManager)
         content.addView(autonomyManager)
 
@@ -309,8 +391,12 @@ class MainActivity : Activity() {
             .setNegativeButton("KAPAT", null)
             .create()
         securityDialog = dialog
+        wakeWordEnabledCheckBox = wakeWordToggle
+        wakeWordStatusText = wakeWordStatus
         dialog.setOnDismissListener {
             if (securityDialog === dialog) securityDialog = null
+            if (wakeWordEnabledCheckBox === wakeWordToggle) wakeWordEnabledCheckBox = null
+            if (wakeWordStatusText === wakeWordStatus) wakeWordStatusText = null
         }
         dialog.setOnShowListener {
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
@@ -499,6 +585,7 @@ class MainActivity : Activity() {
             return
         }
         ReminderNotifications.cancel(this, id)
+        pauseWakeWordMonitoringForInteraction()
         ProactiveSpeechFlow { text, callback -> started.speakProactiveReminder(text, callback) }
             .request(reminder.announcement(), allowed = true) { spoke ->
             val finishedAt = System.currentTimeMillis()
@@ -796,6 +883,119 @@ class MainActivity : Activity() {
         Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
             checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
 
+    private fun onWakeWordSettingToggled(enabled: Boolean) {
+        if (enabled && !hasMicrophonePermission()) {
+            setWakeWordCheckBoxChecked(false)
+            if (!wakeWordPermissionRequestPending && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                wakeWordPermissionRequestPending = true
+                requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_WAKE_WORD_MICROPHONE)
+            }
+            return
+        }
+        if (enabled) enableWakeWordMonitoring() else disableWakeWordMonitoring()
+    }
+
+    private fun enableWakeWordMonitoring() {
+        val settings = wakeWordSettingsStore ?: return
+        if (!hasMicrophonePermission()) {
+            Toast.makeText(this, "Ayşe ile uyandırmak için mikrofon izni gerekli.", Toast.LENGTH_LONG).show()
+            setWakeWordCheckBoxChecked(false)
+            return
+        }
+        settings.setEnabled(true)
+        dispatchRobotEvent(RobotEvent.WakeWordMonitoringChanged(true))
+        val core = robotCore
+        if (core?.snapshot?.activity == RobotActivityState.SLEEPING) {
+            settings.setStatus(WakeWordStatus.STARTING)
+            WakeWordServiceControl.start(this)
+        } else {
+            settings.setStatus(WakeWordStatus.PAUSED)
+            Toast.makeText(this, "Robot uykuya geçtiğinde Ayşe dinlemesi başlayacak.", Toast.LENGTH_LONG).show()
+        }
+        refreshWakeWordControls()
+    }
+
+    private fun disableWakeWordMonitoring() {
+        wakeWordSettingsStore?.setEnabled(false)
+        wakeWordSettingsStore?.setStatus(WakeWordStatus.DISABLED)
+        dispatchRobotEvent(RobotEvent.WakeWordMonitoringChanged(false))
+        WakeWordServiceControl.disable(this)
+        refreshWakeWordControls()
+    }
+
+    private fun pauseWakeWordMonitoringForInteraction() {
+        val settings = wakeWordSettingsStore ?: return
+        if (!settings.isEnabled()) return
+        if (settings.status() in setOf(
+                WakeWordStatus.STARTING,
+                WakeWordStatus.LOADING_MODEL,
+                WakeWordStatus.LISTENING
+            )
+        ) {
+            settings.setStatus(WakeWordStatus.PAUSED)
+            WakeWordServiceControl.pause(this)
+            refreshWakeWordControls()
+        }
+    }
+
+    private fun ensureWakeWordServiceForOptIn() {
+        val settings = wakeWordSettingsStore ?: return
+        val core = robotCore ?: return
+        if (!settings.isEnabled() || !hasMicrophonePermission() ||
+            core.snapshot.activity != RobotActivityState.SLEEPING
+        ) return
+        if (settings.status() in setOf(
+                WakeWordStatus.STARTING,
+                WakeWordStatus.LOADING_MODEL,
+                WakeWordStatus.LISTENING,
+                WakeWordStatus.DETECTED,
+                WakeWordStatus.ERROR
+            )
+        ) return
+        settings.setStatus(WakeWordStatus.STARTING)
+        WakeWordServiceControl.start(this)
+    }
+
+    private fun registerWakeWordReceiver() {
+        if (wakeWordReceiverRegistered) return
+        val filter = IntentFilter().apply {
+            addAction(WakeWordService.ACTION_STATE_CHANGED)
+            addAction(WakeWordService.ACTION_WAKE_DETECTED)
+        }
+        registerReceiver(wakeWordReceiver, filter)
+        wakeWordReceiverRegistered = true
+    }
+
+    private fun unregisterWakeWordReceiver() {
+        if (!wakeWordReceiverRegistered) return
+        try { unregisterReceiver(wakeWordReceiver) } catch (_: IllegalArgumentException) { }
+        wakeWordReceiverRegistered = false
+    }
+
+    private fun wakeWordStatusLabel(): String = wakeWordSettingsStore?.status()?.label ?: WakeWordStatus.DISABLED.label
+
+    private fun refreshWakeWordControls() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post(::refreshWakeWordControls)
+            return
+        }
+        val enabled = wakeWordSettingsStore?.isEnabled() == true
+        setWakeWordCheckBoxChecked(enabled)
+        val status = wakeWordStatusLabel()
+        wakeWordStatusText?.apply {
+            text = "Durum: $status"
+            contentDescription = "Ayşe mikrofon dinleme durumu: $status"
+        }
+    }
+
+    private fun setWakeWordCheckBoxChecked(checked: Boolean) {
+        val checkBox = wakeWordEnabledCheckBox ?: return
+        if (checkBox.isChecked == checked) return
+        updatingWakeWordCheckBox = true
+        checkBox.isChecked = checked
+        updatingWakeWordCheckBox = false
+    }
+
     private fun dispatchRobotEvent(event: RobotEvent) {
         val core = robotCore ?: return
         core.dispatch(event).forEach { effect ->
@@ -855,6 +1055,14 @@ class MainActivity : Activity() {
             else -> Unit
         }
 
+        if (current.activity in setOf(
+                RobotActivityState.LISTENING,
+                RobotActivityState.THINKING,
+                RobotActivityState.SPEAKING,
+                RobotActivityState.PROACTIVE_SPEAKING
+            )
+        ) pauseWakeWordMonitoringForInteraction()
+
         if (current.activity == RobotActivityState.WAKING) faceView?.setCaption(null)
         faceView?.setRobotActivityState(current.activity, current.errorMessage)
     }
@@ -884,6 +1092,7 @@ class MainActivity : Activity() {
 
     private companion object {
         const val REQUEST_MICROPHONE = 4101
+        const val REQUEST_WAKE_WORD_MICROPHONE = 4102
         const val REMINDER_SYNC_RETRY_MS = 30_000L
         const val ERROR_DISPLAY_MS = 1800L
     }

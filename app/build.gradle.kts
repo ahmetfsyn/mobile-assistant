@@ -23,6 +23,10 @@ android {
         targetSdk = 28
         versionCode = 1
         versionName = "0.1.0"
+        ndk {
+            // Current GM 5 Plus system exposes armeabi-v7a. Keep arm64 for future 64-bit phones.
+            abiFilters += listOf("armeabi-v7a", "arm64-v8a")
+        }
         buildConfigField("String", "COMPANION_BACKEND_URL", "\"$companionBackendUrl\"")
         buildConfigField("boolean", "PHASE6_MANUAL_TEST_DEFAULTS", phase6ManualTestDefaults.toString())
         testInstrumentationRunner = "com.companion.assistant.BackendProbeInstrumentation"
@@ -43,5 +47,7 @@ android {
 }
 
 dependencies {
+    implementation("com.alphacephei:vosk-android:0.3.75@aar")
+    implementation("net.java.dev.jna:jna:5.18.1@aar")
     testImplementation("junit:junit:4.13.2")
 }

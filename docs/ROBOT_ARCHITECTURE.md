@@ -1,6 +1,6 @@
 # Robot System Architecture
 
-Status: Phase 1, the initial Phase 5 memory milestone, an initial Phase 6 reminder foundation, and Phase 7.2 sleeping-face integration are implemented. Phase 7.1 investigated the exact Turkish wake phrase `Ayşe`, but no wake engine or always-on microphone behavior is implemented. Android has a synchronous `RobotCore` reducer, typed events/effects, activity snapshots, sleeping/waking/returning-to-sleep and voice states, microphone/consent fields, session generation, lifecycle cancellation, memory management, and controlled reminder delivery. Android SQLite and inexact `AlarmManager` provide offline reminder delivery; backend SQLite/API mirrors reminder definitions and autonomy preferences. Autonomy and proactive speech default off; quiet hours default on. Physical alarm/reboot/audio-failure acceptance remains open. Per-device identity, encrypted local storage/transport, automatic summaries, camera, tools, and hardware behavior remain future work. See [Phase 6 reminders](PHASE6_REMINDERS.md), [Phase 7.1 wake-word decision](PHASE7_WAKE_WORD_DECISION.md), [Phase 7.2 sleeping face](PHASE7_2_SLEEPING_FACE.md), [vision](ROBOT_VISION.md), [technology choices](ROBOT_TECH_STACK.md), [roadmap](ROBOT_ROADMAP.md), [hardware plan](ROBOT_HARDWARE_PLAN.md), and [decisions](ROBOT_DECISIONS.md).
+Status: Phase 1, the initial Phase 5 memory milestone, an initial Phase 6 reminder foundation, Phase 7.2 sleeping-face integration, and a Phase 7.3 local wake-word prototype are implemented. Phase 7.3 uses the exact Turkish phrase `Ayşe` with opt-in-only Vosk monitoring; physical recognition quality and performance are not verified. Android has a synchronous `RobotCore` reducer, typed events/effects, sleeping/waking/awake and voice states, microphone ownership, consent fields, session generation, lifecycle cancellation, memory management, and controlled reminder delivery. Android SQLite and inexact `AlarmManager` provide offline reminder delivery; backend SQLite/API mirrors reminder definitions and autonomy preferences. Autonomy and proactive speech default off; quiet hours default on. Physical wake-word false-activation, battery, and performance acceptance remains open. Per-device identity, encrypted local storage/transport, automatic summaries, camera, tools, and hardware behavior remain future work. See [Phase 6 reminders](PHASE6_REMINDERS.md), [Phase 7.1 wake-word decision](PHASE7_WAKE_WORD_DECISION.md), [Phase 7.2 sleeping face](PHASE7_2_SLEEPING_FACE.md), [Phase 7.3 local wake word](PHASE7_3_AYSE_WAKE_WORD.md), [vision](ROBOT_VISION.md), [technology choices](ROBOT_TECH_STACK.md), [roadmap](ROBOT_ROADMAP.md), [hardware plan](ROBOT_HARDWARE_PLAN.md), and [decisions](ROBOT_DECISIONS.md).
 
 ## 1. Baseline and migration boundary
 
@@ -103,7 +103,7 @@ Phase 2 adds `SpeechInput` to separate microphone ownership from the recorded-PC
 
 Interruption priority: physical stop > app pause/permission revocation > user tap/barge-in > TTS completion > autonomous cue. On interruption, increment session generation, stop TTS/recorder, cancel the in-flight HTTP request, close PCM, and ignore late callbacks. Avoid simultaneous listening and speaker playback until echo behavior has been measured. Captions remain available if TTS fails.
 
-**Wake-word status:** the only requested phrase is `Ayşe`; wake detection is not implemented. Any future always-on listener must be an opt-in local capture effect, expose its active state, and hand off the microphone to existing STT by stopping/releasing its recorder before `RobotCore` starts the voice session. See the [Phase 7.1 decision and acceptance plan](PHASE7_WAKE_WORD_DECISION.md). The existing `SLEEPING` reducer state does not currently synchronize with `FaceBehavior`'s independent timed sleep/wake behavior.
+**Wake-word status:** the only accepted phrase is `Ayşe`. Phase 7.3 adds an opt-in Vosk foreground service with local processing, no audio persistence/networking, explicit stop controls, and shared microphone leases. It transitions `SLEEPING -> WAKING -> AWAKE`; it does not start STT. The user must tap the face to begin the existing push-to-talk flow, and monitoring remains paused after speech in this phase. Physical acoustic accuracy and false-activation rate are not yet verified. See the [Phase 7.1 decision](PHASE7_WAKE_WORD_DECISION.md) and [Phase 7.3 implementation](PHASE7_3_AYSE_WAKE_WORD.md).
 
 ## 5. Memory and personality
 
@@ -196,6 +196,10 @@ stateDiagram-v2
   SLEEPING --> WAKING: face tap
   WAKING --> LISTENING: opening animation complete + microphone permission
   WAKING --> IDLE: permission request needed
+  SLEEPING --> WAKING: exact Ayşe detected locally
+  WAKING --> AWAKE: wake-word animation complete, no STT
+  AWAKE --> LISTENING: explicit face tap
+  AWAKE --> RETURNING_TO_SLEEP: explicit sleep request
   IDLE --> WAKING: face tap
   IDLE --> SLEEPING: explicit sleep request
   IDLE --> OBSERVING: explicit camera session
@@ -218,9 +222,9 @@ stateDiagram-v2
   ACTING --> ERROR: hardware fault
 ```
 
-`BOOTING`, `IDLE`, `WAKING`, `LISTENING`, `THINKING`, `SPEAKING`, `PROACTIVE_SPEAKING`, `RETURNING_TO_SLEEP`, `SLEEPING`, `OBSERVING`, `ACTING`, and `ERROR` are **exclusive activity states**. Emotion, connectivity, and hardware safety are orthogonal snapshot fields, not more mutually exclusive states. Only Core's reducer commits transitions. Modules emit events with session IDs; stale completions are ignored. The face tap starts the visual wake transition and the existing push-to-talk flow; it is not wake-word detection. A stop event can preempt any state, cancels effects, and disables motion. User interruption preempts `THINKING`/`SPEAKING`; autonomous candidates never preempt a user turn. Recoverable interaction errors show a short error face and return through `RETURNING_TO_SLEEP`; local capture/hardware faults may enter `ERROR` until capability recheck or user action. No automatic repeat of an actuation command.
+`BOOTING`, `IDLE`, `WAKING`, `AWAKE`, `LISTENING`, `THINKING`, `SPEAKING`, `PROACTIVE_SPEAKING`, `RETURNING_TO_SLEEP`, `SLEEPING`, `OBSERVING`, `ACTING`, and `ERROR` are **exclusive activity states**. Emotion, connectivity, and hardware safety are orthogonal snapshot fields, not more mutually exclusive states. Only Core's reducer commits transitions. Modules emit events with session IDs; stale completions are ignored. A local `Ayşe` detection opens the face into `AWAKE` without STT; a later face tap starts push-to-talk. A touch while asleep still starts the original wake animation and push-to-talk flow. A stop event can preempt any state, cancels effects, and disables motion. User interruption preempts `THINKING`/`SPEAKING`; autonomous candidates never preempt a user turn. Recoverable interaction errors show a short error face and return through `RETURNING_TO_SLEEP`; local capture/hardware faults may enter `ERROR` until capability recheck or user action. No automatic repeat of an actuation command.
 
-Future wake-word support would trigger the existing `SLEEPING -> WAKING -> LISTENING` path after the local detector recognizes the exact phrase `Ayşe`. The current screen-tap event triggers that path. No detector owns the microphone in standby today; continuous capture, microphone hand-off, and wake-word support remain unimplemented.
+The Phase 7.3 listener is opt-in and defaults off. It owns the mic only while active; push-to-talk first pauses it and obtains an exclusive mic lease. A detected wake stops capture before the Core event is sent. Automatic STT hand-off and monitoring restart after TTS remain later phases.
 
 ## 9. Future hardware path
 

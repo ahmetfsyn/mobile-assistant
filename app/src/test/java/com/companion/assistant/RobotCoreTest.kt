@@ -264,6 +264,46 @@ class RobotCoreTest {
     }
 
     @Test
+    fun localWakeDetectionOpensAttentiveFaceWithoutStartingSpeechRecognition() {
+        val core = readyCoreWithMicrophone()
+        core.dispatch(RobotEvent.WakeWordMonitoringChanged(true))
+
+        assertTrue(core.dispatch(RobotEvent.WakeWordDetected).isEmpty())
+        assertEquals(RobotActivityState.WAKING, core.snapshot.activity)
+        val wakeSession = core.snapshot.sessionId
+        assertTrue(core.dispatch(RobotEvent.WakeWordDetected).isEmpty())
+        assertEquals(wakeSession, core.snapshot.sessionId)
+
+        assertTrue(core.dispatch(RobotEvent.WakeAnimationCompleted(wakeSession)).isEmpty())
+        assertEquals(RobotActivityState.AWAKE, core.snapshot.activity)
+        assertEquals("UYANDIM · DOKUN VE KONUŞ", RobotFacePresenter.forActivity(core.snapshot.activity).status)
+
+        assertEquals(
+            listOf(RobotEffect.StartListening(wakeSession + 1L)),
+            core.dispatch(RobotEvent.FaceTapped)
+        )
+        assertEquals(RobotActivityState.LISTENING, core.snapshot.activity)
+    }
+
+    @Test
+    fun localWakeDetectionRequiresOptInPermissionAndSleepingState() {
+        val noOptIn = readyCoreWithMicrophone()
+        noOptIn.dispatch(RobotEvent.WakeWordDetected)
+        assertEquals(RobotActivityState.SLEEPING, noOptIn.snapshot.activity)
+
+        val noPermission = readyCore()
+        noPermission.dispatch(RobotEvent.WakeWordMonitoringChanged(true))
+        noPermission.dispatch(RobotEvent.WakeWordDetected)
+        assertEquals(RobotActivityState.SLEEPING, noPermission.snapshot.activity)
+
+        val active = readyCoreWithMicrophone()
+        active.dispatch(RobotEvent.WakeWordMonitoringChanged(true))
+        active.dispatch(RobotEvent.FaceTapped)
+        active.dispatch(RobotEvent.WakeWordDetected)
+        assertEquals(RobotActivityState.WAKING, active.snapshot.activity)
+    }
+
+    @Test
     fun facePresentationMatchesSleepWakeAndVoiceState() {
         assertEquals(FaceExpression.SLEEPING, RobotFacePresenter.forActivity(RobotActivityState.SLEEPING).expression)
         assertEquals(FaceExpression.ATTENTIVE, RobotFacePresenter.forActivity(RobotActivityState.WAKING).expression)

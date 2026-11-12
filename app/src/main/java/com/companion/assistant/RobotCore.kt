@@ -10,6 +10,7 @@ internal enum class RobotActivityState {
     SPEAKING,
     PROACTIVE_SPEAKING,
     RETURNING_TO_SLEEP,
+    AWAKE,
     SLEEPING,
     OBSERVING,
     ACTING,
@@ -33,6 +34,7 @@ internal data class RobotConsentState(
     val persistentMemoryEnabled: Boolean = false,
     val autonomyEnabled: Boolean = false,
     val autonomousSpeechEnabled: Boolean = false,
+    val wakeWordMonitoringEnabled: Boolean = false,
     val quietHoursActive: Boolean = false
 )
 
@@ -55,6 +57,8 @@ internal sealed interface RobotEvent {
     data class AutonomyEnabledChanged(val enabled: Boolean) : RobotEvent
     data class AutonomousSpeechConsentChanged(val enabled: Boolean) : RobotEvent
     data class QuietHoursChanged(val active: Boolean) : RobotEvent
+    data class WakeWordMonitoringChanged(val enabled: Boolean) : RobotEvent
+    data object WakeWordDetected : RobotEvent
     data class RecordingCompleted(val sessionId: Long) : RobotEvent
     data class TranscriptReady(val sessionId: Long, val hasText: Boolean) : RobotEvent
     data class ConversationReady(val sessionId: Long, val hasReply: Boolean) : RobotEvent
@@ -96,6 +100,7 @@ internal class RobotCore(
 
     private var waitingForMicrophonePermission = false
     private var hostResumed = false
+    private var wakingFromWakeWord = false
 
     fun dispatch(event: RobotEvent): List<RobotEffect> {
         check(Thread.currentThread() === ownerThread) {
@@ -192,6 +197,19 @@ internal class RobotCore(
             emptyList()
         }
 
+        is RobotEvent.WakeWordMonitoringChanged -> {
+            snapshot = snapshot.copy(
+                consent = snapshot.consent.copy(wakeWordMonitoringEnabled = event.enabled)
+            )
+            emptyList()
+        }
+
+        RobotEvent.WakeWordDetected -> {
+            if (hostResumed && snapshot.activity == RobotActivityState.SLEEPING &&
+                snapshot.consent.wakeWordMonitoringEnabled && snapshot.consent.microphonePermissionGranted
+            ) beginWaking(fromWakeWord = true) else emptyList()
+        }
+
         is RobotEvent.RecordingCompleted -> {
             if (isCurrent(event.sessionId, RobotActivityState.LISTENING)) {
                 snapshot = snapshot.copy(activity = RobotActivityState.THINKING)
@@ -236,6 +254,10 @@ internal class RobotCore(
             if (!isCurrent(event.sessionId, RobotActivityState.WAKING)) return emptyList()
             if (!hostResumed) {
                 enterSleepingImmediately()
+                emptyList()
+            } else if (wakingFromWakeWord) {
+                wakingFromWakeWord = false
+                snapshot = snapshot.copy(activity = RobotActivityState.AWAKE, errorMessage = null)
                 emptyList()
             } else if (snapshot.consent.microphonePermissionGranted) {
                 startListening()
@@ -296,7 +318,7 @@ internal class RobotCore(
         }
 
         RobotEvent.SleepRequested -> {
-            if (snapshot.activity == RobotActivityState.IDLE) {
+            if (snapshot.activity == RobotActivityState.IDLE || snapshot.activity == RobotActivityState.AWAKE) {
                 beginReturningToSleep()
             }
             emptyList()
@@ -322,6 +344,10 @@ internal class RobotCore(
         RobotEvent.HostPaused -> {
             hostResumed = false
             if (snapshot.activity in VOICE_STATES) cancelToSleepingImmediately()
+            else if (snapshot.activity == RobotActivityState.AWAKE) {
+                enterSleepingImmediately()
+                emptyList()
+            }
             else if (snapshot.activity == RobotActivityState.WAKING ||
                 snapshot.activity == RobotActivityState.RETURNING_TO_SLEEP
             ) {
@@ -351,13 +377,19 @@ internal class RobotCore(
         if (!hostResumed || activity == RobotActivityState.BOOTING || activity == RobotActivityState.CLOSED) {
             return emptyList()
         }
+        if (activity == RobotActivityState.AWAKE) {
+            if (snapshot.consent.microphonePermissionGranted) return startListening()
+            waitingForMicrophonePermission = true
+            return listOf(RobotEffect.RequestMicrophonePermission)
+        }
         if (activity == RobotActivityState.LISTENING) return cancelToSleep()
         if (activity == RobotActivityState.WAKING) return emptyList()
         return beginWaking()
     }
 
-    private fun beginWaking(): List<RobotEffect> {
+    private fun beginWaking(fromWakeWord: Boolean = false): List<RobotEffect> {
         waitingForMicrophonePermission = false
+        wakingFromWakeWord = fromWakeWord
         val activeSession = activeVoiceSession()
         snapshot = snapshot.copy(
             activity = RobotActivityState.WAKING,
@@ -369,6 +401,7 @@ internal class RobotCore(
 
     private fun beginReturningToSleep() {
         waitingForMicrophonePermission = false
+        wakingFromWakeWord = false
         snapshot = snapshot.copy(
             activity = RobotActivityState.RETURNING_TO_SLEEP,
             sessionId = snapshot.sessionId + 1L,
@@ -403,6 +436,7 @@ internal class RobotCore(
 
     private fun enterSleepingImmediately() {
         waitingForMicrophonePermission = false
+        wakingFromWakeWord = false
         snapshot = snapshot.copy(
             activity = RobotActivityState.SLEEPING,
             sessionId = snapshot.sessionId + 1L,
