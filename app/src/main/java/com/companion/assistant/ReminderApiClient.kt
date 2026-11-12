@@ -29,6 +29,16 @@ internal class ReminderApiClient(
         request("PATCH", "/v1/reminders/${reminder.id}", reminderJson(reminder))
     }
 
+    /** Mirrors local authority: update existing backend records, creating them if an earlier sync was offline. */
+    fun sync(reminder: ReminderRecord) {
+        try {
+            update(reminder)
+        } catch (error: IOException) {
+            if (!Regex("HTTP 404\\.").containsMatchIn(error.message.orEmpty())) throw error
+            create(reminder)
+        }
+    }
+
     fun delete(id: String) {
         request("DELETE", "/v1/reminders/$id", null)
     }

@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { conversationFingerprint, createConversationServer, readRuntimeConfig } from "../src/server.mjs";
 
 async function withServer(options, run) {
@@ -156,6 +159,80 @@ test("autonomy settings default to safe values and update with validation", asyn
     });
     assert.equal(invalid.status, 400);
   });
+});
+
+test("autonomy settings and reminder records persist when the API server restarts", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "companion-phase6-persistence-"));
+  const databasePath = join(directory, "memories.sqlite");
+  const reminderId = "c1b2c3d4-0000-4000-8000-123456789abc";
+  let baseUrl;
+  let server;
+
+  const start = async () => {
+    server = createConversationServer({
+      env: { AI_PROVIDER: "mock" },
+      memoryDatabasePath: databasePath,
+      requestLogger: () => {}
+    });
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    baseUrl = `http://127.0.0.1:${server.address().port}`;
+  };
+  const stop = async () => {
+    if (!server?.listening) return;
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  };
+
+  try {
+    await start();
+    const changedSettings = {
+      autonomyEnabled: true,
+      proactiveSpeechEnabled: true,
+      quietHoursEnabled: false,
+      quietHoursStart: "21:15",
+      quietHoursEnd: "07:10"
+    };
+    const settingsUpdate = await fetch(`${baseUrl}/v1/autonomy`, {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(changedSettings)
+    });
+    assert.equal(settingsUpdate.status, 200);
+
+    const reminder = {
+      id: reminderId,
+      message: "Faz 6 kalıcılık denemesi",
+      scheduledAt: "2030-01-02T10:00:00.000Z",
+      timeZone: "Europe/Istanbul",
+      recurrence: "none",
+      enabled: true
+    };
+    const created = await fetch(`${baseUrl}/v1/reminders`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(reminder)
+    });
+    assert.equal(created.status, 201);
+    await stop();
+
+    await start();
+    const persistedSettings = await fetch(`${baseUrl}/v1/autonomy`).then((response) => response.json());
+    for (const [key, value] of Object.entries(changedSettings)) assert.equal(persistedSettings.settings[key], value);
+
+    const persistedReminders = await fetch(`${baseUrl}/v1/reminders`).then((response) => response.json());
+    assert.deepEqual(persistedReminders.reminders.find((item) => item.id === reminderId), {
+      ...reminder,
+      scheduledAt: reminder.scheduledAt,
+      enabled: true,
+      status: "scheduled",
+      createdAt: persistedReminders.reminders.find((item) => item.id === reminderId).createdAt,
+      updatedAt: persistedReminders.reminders.find((item) => item.id === reminderId).updatedAt,
+      lastDeliveredAt: null,
+      nextScheduledAt: reminder.scheduledAt,
+      deliveryAttempts: 0
+    });
+  } finally {
+    await stop();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("configured companion access token gates config and conversation routes without leaking credentials", async () => {

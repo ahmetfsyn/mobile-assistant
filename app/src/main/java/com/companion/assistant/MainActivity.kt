@@ -137,6 +137,7 @@ class MainActivity : Activity() {
         reminderSettingsStore?.get()?.let(::applyReminderSettingsToRobot)
         reminderStore?.recoverDue()?.forEach { reminderScheduler?.schedule(it) }
         reminderScheduler?.scheduleAll()
+        retryPendingDeliveredReminderSyncs()
         faceView?.start()
     }
 
@@ -339,7 +340,7 @@ class MainActivity : Activity() {
     private fun syncReminderSettings(settings: ReminderSettings) {
         reminderSyncExecutor.execute {
             try { reminderApiClient?.syncSettings(settings) }
-            catch (_: Exception) { android.util.Log.w("ReminderSync", "settings_sync_failed") }
+            catch (error: Exception) { android.util.Log.w("ReminderSync", "settings_sync_failed reason=${reminderSyncFailureReason(error)}") }
         }
     }
 
@@ -347,18 +348,52 @@ class MainActivity : Activity() {
         reminderSyncExecutor.execute {
             try {
                 val api = reminderApiClient ?: return@execute
-                if (isNew) api.create(reminder) else api.update(reminder)
-            } catch (_: Exception) {
-                android.util.Log.w("ReminderSync", "reminder_sync_failed id=${reminder.id}")
+                if (isNew) api.create(reminder) else api.sync(reminder)
+                PendingReminderSyncStore(applicationContext).markSynced(reminder.id)
+            } catch (error: Exception) {
+                android.util.Log.w("ReminderSync", "reminder_sync_failed id=${reminder.id} reason=${reminderSyncFailureReason(error)}")
             }
         }
     }
 
     private fun syncReminderDeletion(id: String) {
         reminderSyncExecutor.execute {
-            try { reminderApiClient?.delete(id) }
-            catch (_: Exception) { android.util.Log.w("ReminderSync", "reminder_delete_sync_failed id=$id") }
+            try {
+                reminderApiClient?.delete(id)
+                PendingReminderSyncStore(applicationContext).markSynced(id)
+            }
+            catch (error: Exception) {
+                android.util.Log.w("ReminderSync", "reminder_delete_sync_failed id=$id reason=${reminderSyncFailureReason(error)}")
+            }
         }
+    }
+
+    private fun retryPendingDeliveredReminderSyncs() {
+        if (BuildConfig.COMPANION_BACKEND_URL.isBlank()) return
+        val queue = PendingReminderSyncStore(applicationContext)
+        val store = reminderStore ?: return
+        val api = reminderApiClient ?: return
+        queue.pendingIds().forEach { id ->
+            val reminder = store.get(id)
+            if (reminder == null) {
+                queue.markSynced(id)
+            } else {
+                reminderSyncExecutor.execute {
+                    try {
+                        api.sync(reminder)
+                        queue.markSynced(id)
+                        android.util.Log.i("ReminderSync", "delivery_retry_succeeded id=$id")
+                    } catch (error: Exception) {
+                        android.util.Log.w("ReminderSync", "delivery_retry_failed id=$id reason=${reminderSyncFailureReason(error)}")
+                    }
+                }
+            }
+        }
+    }
+
+    private fun reminderSyncFailureReason(error: Exception): String {
+        val httpStatus = Regex("HTTP (\\d{3})").find(error.message.orEmpty())?.groupValues?.get(1)
+        return httpStatus?.let { "http_$it" } ?: error.javaClass.simpleName
     }
 
     private fun registerReminderReceiver() {

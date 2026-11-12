@@ -104,6 +104,31 @@ internal class ReminderCooldownStore(context: Context) {
     }
 }
 
+/** Persists background delivery sync work until the companion can reach its local backend again. */
+internal class PendingReminderSyncStore(context: Context) {
+    private val preferences = context.applicationContext.getSharedPreferences("companion_reminder_sync", Context.MODE_PRIVATE)
+
+    fun pendingIds(): Set<String> = synchronized(lock) {
+        preferences.getStringSet(KEY_PENDING_DELIVERIES, emptySet()).orEmpty().toSet()
+    }
+
+    fun markPending(id: String) = synchronized(lock) {
+        val ids = preferences.getStringSet(KEY_PENDING_DELIVERIES, emptySet()).orEmpty().toMutableSet()
+        ids.add(id)
+        preferences.edit().putStringSet(KEY_PENDING_DELIVERIES, ids).commit()
+    }
+
+    fun markSynced(id: String) = synchronized(lock) {
+        val ids = preferences.getStringSet(KEY_PENDING_DELIVERIES, emptySet()).orEmpty().toMutableSet()
+        if (ids.remove(id)) preferences.edit().putStringSet(KEY_PENDING_DELIVERIES, ids).commit()
+    }
+
+    private companion object {
+        const val KEY_PENDING_DELIVERIES = "pending_deliveries"
+        val lock = Any()
+    }
+}
+
 class ReminderAlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != ReminderScheduler.ACTION_REMINDER_ALARM) return
@@ -126,7 +151,7 @@ class ReminderAlarmReceiver : BroadcastReceiver() {
         val reminder = store.claimDue(id, expectedAt, now) ?: return
         if (reminder.status == "needs_attention") {
             if (ReminderNotifications.post(context, reminder, "Hatırlatma teslim edilemedi. Uygulamadan tekrar deneyebilirsin.")) {
-                store.markDelivered(id, expectedAt, now)
+                store.markDelivered(id, expectedAt, now)?.let { syncDeliveredReminder(context, it) }
                 scheduler.scheduleAll()
             }
             return
@@ -143,11 +168,32 @@ class ReminderAlarmReceiver : BroadcastReceiver() {
             return
         }
         if (ReminderNotifications.post(context, reminder)) {
-            store.markDelivered(id, expectedAt, now)
+            store.markDelivered(id, expectedAt, now)?.let { syncDeliveredReminder(context, it) }
             scheduler.scheduleAll()
         } else {
             scheduler.defer(id, expectedAt, now + ReminderScheduler.RETRY_DELAY_MS, failedAttempt = true)
         }
+    }
+
+    private fun syncDeliveredReminder(context: Context, reminder: ReminderRecord) {
+        if (BuildConfig.COMPANION_BACKEND_URL.isBlank()) return
+        val pendingSyncStore = PendingReminderSyncStore(context)
+        pendingSyncStore.markPending(reminder.id)
+        val pendingResult = goAsync()
+        Thread {
+            try {
+                val tokenStore = CompanionAccessTokenStore(context.applicationContext)
+                ReminderApiClient(BuildConfig.COMPANION_BACKEND_URL, tokenStore::accessToken).update(reminder)
+                pendingSyncStore.markSynced(reminder.id)
+                Log.i("ReminderSync", "background_delivery_synced id=${reminder.id}")
+            } catch (error: Exception) {
+                val httpStatus = Regex("HTTP (\\d{3})").find(error.message.orEmpty())?.groupValues?.get(1)
+                val reason = httpStatus?.let { "http_$it" } ?: error.javaClass.simpleName
+                Log.w("ReminderSync", "background_delivery_sync_failed id=${reminder.id} reason=$reason")
+            } finally {
+                pendingResult.finish()
+            }
+        }.start()
     }
 }
 
