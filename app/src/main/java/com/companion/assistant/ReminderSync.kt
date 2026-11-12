@@ -59,7 +59,7 @@ internal object ProactiveSpeechGate {
         !settings.autonomyEnabled -> "otonomi kapalı"
         !settings.proactiveSpeechEnabled -> "sesli hatırlatma izni kapalı"
         ReminderTimePolicy.isQuiet(nowMillis, settings, zoneId) -> "sessiz saatler etkin"
-        robotState != RobotActivityState.IDLE -> "robot meşgul"
+        !robotState.canStartProactiveSpeech() -> "robot meşgul"
         nextAllowedAt > nowMillis -> "konuşma bekleme süresi dolmadı"
         else -> null
     }

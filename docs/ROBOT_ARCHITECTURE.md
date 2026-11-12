@@ -1,10 +1,10 @@
 # Robot System Architecture
 
-Status: Phase 1, the initial Phase 5 memory milestone, and an initial Phase 6 reminder foundation are implemented. Phase 7.1 has investigated an exact Turkish wake word, but no wake engine or always-on microphone behavior is implemented. Android has a synchronous `RobotCore` reducer, typed events/effects, activity snapshots, microphone/consent fields, session generation, lifecycle cancellation, memory management, and controlled reminder delivery. Android SQLite and inexact `AlarmManager` provide offline reminder delivery; backend SQLite/API mirrors reminder definitions and autonomy preferences. Autonomy and proactive speech default off; quiet hours default on. Physical alarm/reboot/audio-failure acceptance remains open. Per-device identity, encrypted local storage/transport, automatic summaries, camera, tools, and hardware behavior remain future work. See [Phase 6 reminders](PHASE6_REMINDERS.md), [Phase 7.1 wake-word decision](PHASE7_WAKE_WORD_DECISION.md), [vision](ROBOT_VISION.md), [technology choices](ROBOT_TECH_STACK.md), [roadmap](ROBOT_ROADMAP.md), [hardware plan](ROBOT_HARDWARE_PLAN.md), and [decisions](ROBOT_DECISIONS.md).
+Status: Phase 1, the initial Phase 5 memory milestone, an initial Phase 6 reminder foundation, and Phase 7.2 sleeping-face integration are implemented. Phase 7.1 investigated the exact Turkish wake phrase `Ayşe`, but no wake engine or always-on microphone behavior is implemented. Android has a synchronous `RobotCore` reducer, typed events/effects, activity snapshots, sleeping/waking/returning-to-sleep and voice states, microphone/consent fields, session generation, lifecycle cancellation, memory management, and controlled reminder delivery. Android SQLite and inexact `AlarmManager` provide offline reminder delivery; backend SQLite/API mirrors reminder definitions and autonomy preferences. Autonomy and proactive speech default off; quiet hours default on. Physical alarm/reboot/audio-failure acceptance remains open. Per-device identity, encrypted local storage/transport, automatic summaries, camera, tools, and hardware behavior remain future work. See [Phase 6 reminders](PHASE6_REMINDERS.md), [Phase 7.1 wake-word decision](PHASE7_WAKE_WORD_DECISION.md), [Phase 7.2 sleeping face](PHASE7_2_SLEEPING_FACE.md), [vision](ROBOT_VISION.md), [technology choices](ROBOT_TECH_STACK.md), [roadmap](ROBOT_ROADMAP.md), [hardware plan](ROBOT_HARDWARE_PLAN.md), and [decisions](ROBOT_DECISIONS.md).
 
 ## 1. Baseline and migration boundary
 
-Android `MainActivity` creates `RobotCore`, `FaceView`, `VoiceInteractionController`, `TextToSpeechManager`, a `ConversationEngine`, and the local reminder store/scheduler. `RobotCore` owns boot/idle/voice/proactive-speech/error activity state, session generations, microphone/consent state, and host pause/resume. It returns effects for the host to execute and rejects stale session events. `VoiceInteractionController` intercepts only explicit reminder commands from the current recognized transcript; ordinary conversation remains on the existing backend path. The backend provides health/config/conversation, memory, reminder CRUD, and autonomy settings routes. It bounds the eight-message conversation history, uses opt-in structured SQLite memories, and stores a separate validated reminder/settings mirror. The optional shared-token gate protects config, conversation, memory, and reminder routes when configured; Android stores the token encrypted with Android Keystore. A native Android speech recognition adapter is the default, but GM 5 Plus Turkish accuracy and offline behavior remain unverified. Per-device isolation, encrypted memory storage/transport, camera, tool execution, and ESP32 remain unimplemented.
+Android `MainActivity` creates `RobotCore`, `FaceView`, `VoiceInteractionController`, `TextToSpeechManager`, a `ConversationEngine`, and the local reminder store/scheduler. `RobotCore` owns boot/sleep/wake/voice/proactive-speech/error activity state, session generations, microphone/consent state, and host pause/resume. It returns effects for the host to execute and rejects stale session events. `VoiceInteractionController` intercepts only explicit reminder commands from the current recognized transcript; ordinary conversation remains on the existing backend path. The backend provides health/config/conversation, memory, reminder CRUD, and autonomy settings routes. It bounds the eight-message conversation history, uses opt-in structured SQLite memories, and stores a separate validated reminder/settings mirror. The optional shared-token gate protects config, conversation, memory, and reminder routes when configured; Android stores the token encrypted with Android Keystore. A native Android speech recognition adapter is the default, but GM 5 Plus Turkish accuracy and offline behavior remain unverified. Per-device isolation, encrypted memory storage/transport, camera, tool execution, and ESP32 remain unimplemented.
 
 Add **Robot Core on Android** as the single authority for the robot's visible/activity state, consent, session IDs, and device lifecycle. It receives events from the current voice controller and face; it does not replace their rendering/audio internals. Keep the backend as a **modular monolith** for AI, policy validation, future structured memory, and hardware gateway. The ESP32 later owns real-time electrical safety and rejects unsafe commands independently. A model never controls physical hardware directly.
 
@@ -191,22 +191,26 @@ Reminders are the only Phase 6 proactive trigger. They originate from an explici
 ```mermaid
 stateDiagram-v2
   [*] --> BOOTING
-  BOOTING --> IDLE: initialization complete
+  BOOTING --> SLEEPING: initialization complete
   BOOTING --> ERROR: required local component failed
-  IDLE --> LISTENING: tap + microphone permission
+  SLEEPING --> WAKING: face tap
+  WAKING --> LISTENING: opening animation complete + microphone permission
+  WAKING --> IDLE: permission request needed
+  IDLE --> WAKING: face tap
+  IDLE --> SLEEPING: explicit sleep request
   IDLE --> OBSERVING: explicit camera session
   IDLE --> ACTING: approved local action
-  IDLE --> SLEEPING: inactivity or user sleep
   LISTENING --> THINKING: recording + STT complete
-  LISTENING --> IDLE: cancel / no speech
+  LISTENING --> RETURNING_TO_SLEEP: cancel
   THINKING --> SPEAKING: validated reply
-  THINKING --> IDLE: cancel / local fallback complete
-  SPEAKING --> IDLE: TTS complete
-  SPEAKING --> LISTENING: user interrupts
+  THINKING --> RETURNING_TO_SLEEP: failure dismissal or cancellation
+  SPEAKING --> RETURNING_TO_SLEEP: TTS complete or cancellation
+  PROACTIVE_SPEAKING --> RETURNING_TO_SLEEP: reminder speech complete
+  RETURNING_TO_SLEEP --> SLEEPING: closing animation complete
+  SPEAKING --> WAKING: user interrupts
   OBSERVING --> IDLE: result / permission revoked / timeout
   ACTING --> IDLE: verified action result / safe stop
-  SLEEPING --> IDLE: wake event
-  ERROR --> IDLE: recoverable fault cleared
+  ERROR --> RETURNING_TO_SLEEP: recoverable fault dismissed
   IDLE --> ERROR: unrecoverable local fault
   LISTENING --> ERROR: capture fault
   THINKING --> ERROR: processing fault
@@ -214,9 +218,9 @@ stateDiagram-v2
   ACTING --> ERROR: hardware fault
 ```
 
-`BOOTING`, `IDLE`, `LISTENING`, `THINKING`, `SPEAKING`, `SLEEPING`, `OBSERVING`, `ACTING`, and `ERROR` are **exclusive activity states**. Emotion, connectivity, and hardware safety are orthogonal snapshot fields, not more mutually exclusive states. Only Core's reducer commits transitions. Modules emit events with session IDs; stale completions are ignored. A stop event can preempt any state, cancels effects, and disables motion. User interruption preempts `THINKING`/`SPEAKING`; autonomous candidates never preempt a user turn. Recoverable backend errors show a short error face and return to `IDLE`; local capture/hardware faults may enter `ERROR` until capability recheck or user action. No automatic repeat of an actuation command.
+`BOOTING`, `IDLE`, `WAKING`, `LISTENING`, `THINKING`, `SPEAKING`, `PROACTIVE_SPEAKING`, `RETURNING_TO_SLEEP`, `SLEEPING`, `OBSERVING`, `ACTING`, and `ERROR` are **exclusive activity states**. Emotion, connectivity, and hardware safety are orthogonal snapshot fields, not more mutually exclusive states. Only Core's reducer commits transitions. Modules emit events with session IDs; stale completions are ignored. The face tap starts the visual wake transition and the existing push-to-talk flow; it is not wake-word detection. A stop event can preempt any state, cancels effects, and disables motion. User interruption preempts `THINKING`/`SPEAKING`; autonomous candidates never preempt a user turn. Recoverable interaction errors show a short error face and return through `RETURNING_TO_SLEEP`; local capture/hardware faults may enter `ERROR` until capability recheck or user action. No automatic repeat of an actuation command.
 
-The future wake-word lifecycle may add `WAKING` and `RETURNING_TO_SLEEP` to this same reducer, with `SLEEPING -> WAKING -> LISTENING -> THINKING -> SPEAKING -> RETURNING_TO_SLEEP -> SLEEPING`. The detector owns the microphone only in opted-in standby; STT owns it after a successful hand-off. These states and transitions are design work, not current app behavior.
+Future wake-word support would trigger the existing `SLEEPING -> WAKING -> LISTENING` path after the local detector recognizes the exact phrase `Ayşe`. The current screen-tap event triggers that path. No detector owns the microphone in standby today; continuous capture, microphone hand-off, and wake-word support remain unimplemented.
 
 ## 9. Future hardware path
 

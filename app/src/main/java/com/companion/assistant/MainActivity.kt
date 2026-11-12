@@ -71,6 +71,18 @@ class MainActivity : Activity() {
             dispatchRobotEvent(RobotEvent.ErrorDismissed(snapshot.sessionId))
         }
     }
+    private var pendingWakeAnimationSession: Long? = null
+    private var pendingSleepAnimationSession: Long? = null
+    private val wakeAnimationFinished = Runnable {
+        val session = pendingWakeAnimationSession ?: return@Runnable
+        pendingWakeAnimationSession = null
+        dispatchRobotEvent(RobotEvent.WakeAnimationCompleted(session))
+    }
+    private val sleepAnimationFinished = Runnable {
+        val session = pendingSleepAnimationSession ?: return@Runnable
+        pendingSleepAnimationSession = null
+        dispatchRobotEvent(RobotEvent.SleepAnimationCompleted(session))
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -80,7 +92,7 @@ class MainActivity : Activity() {
 
         val face = FaceView(this)
         faceView = face
-        val core = RobotCore(::onRobotSnapshotChanged)
+        val core = RobotCore { _, current -> onRobotSnapshotChanged(current) }
         robotCore = core
         val tokenStore = CompanionAccessTokenStore(applicationContext)
         accessTokenStore = tokenStore
@@ -130,6 +142,7 @@ class MainActivity : Activity() {
             reminderCommandProcessor = reminderCommands
         )
         face.setOnFaceTapListener { onFaceTapped() }
+        face.setOnSleepRequestListener { dispatchRobotEvent(RobotEvent.SleepRequested) }
         face.setOnSettingsTapListener { showSecuritySettings(authenticationRequired = false) }
         setContentView(face)
         pendingReminderNotificationId = intent?.getStringExtra(ReminderNotifications.EXTRA_REMINDER_ID)
@@ -458,7 +471,7 @@ class MainActivity : Activity() {
         }
         applyReminderSettingsToRobot(settings)
         val core = robotCore
-        if (core?.snapshot?.activity != RobotActivityState.IDLE) {
+        if (core?.snapshot?.activity?.canStartProactiveSpeech() != true) {
             ReminderNotifications.cancel(this, id)
             scheduler.defer(id, expectedAt, now + ReminderScheduler.RETRY_DELAY_MS, failedAttempt = false)
             return
@@ -805,34 +818,45 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun onRobotSnapshotChanged(previous: RobotSnapshot, current: RobotSnapshot) {
+    private fun onRobotSnapshotChanged(current: RobotSnapshot) {
+        if (current.activity != RobotActivityState.WAKING) {
+            mainHandler.removeCallbacks(wakeAnimationFinished)
+            pendingWakeAnimationSession = null
+        }
+        if (current.activity != RobotActivityState.RETURNING_TO_SLEEP) {
+            mainHandler.removeCallbacks(sleepAnimationFinished)
+            pendingSleepAnimationSession = null
+        }
+
         when (current.activity) {
-            RobotActivityState.LISTENING -> {
-                mainHandler.removeCallbacks(dismissRobotError)
-                faceView?.showVoiceListening()
+            RobotActivityState.WAKING -> {
+                pendingWakeAnimationSession = current.sessionId
+                mainHandler.postDelayed(wakeAnimationFinished, RobotFaceTransitionTiming.WAKE_ANIMATION_MS)
             }
 
-            RobotActivityState.THINKING -> faceView?.showVoiceProcessing()
-            RobotActivityState.SPEAKING -> faceView?.showVoiceSpeaking()
-            RobotActivityState.PROACTIVE_SPEAKING -> faceView?.showVoiceSpeaking()
+            RobotActivityState.LISTENING,
+            RobotActivityState.THINKING,
+            RobotActivityState.SPEAKING,
+            RobotActivityState.PROACTIVE_SPEAKING -> mainHandler.removeCallbacks(dismissRobotError)
+
             RobotActivityState.ERROR -> {
                 faceView?.setCaption(null)
-                faceView?.showVoiceError(current.errorMessage ?: "KONUŞMA TAMAMLANAMADI")
                 mainHandler.removeCallbacks(dismissRobotError)
                 mainHandler.postDelayed(dismissRobotError, ERROR_DISPLAY_MS)
             }
 
-            RobotActivityState.IDLE -> {
+            RobotActivityState.RETURNING_TO_SLEEP -> {
                 mainHandler.removeCallbacks(dismissRobotError)
-                if (previous.activity in ACTIVE_FACE_STATES) faceView?.finishVoiceInteraction()
+                faceView?.setCaption(null)
+                pendingSleepAnimationSession = current.sessionId
+                mainHandler.postDelayed(sleepAnimationFinished, RobotFaceTransitionTiming.SLEEP_ANIMATION_MS)
             }
 
-            RobotActivityState.BOOTING,
-            RobotActivityState.SLEEPING,
-            RobotActivityState.OBSERVING,
-            RobotActivityState.ACTING,
-            RobotActivityState.CLOSED -> Unit
+            else -> Unit
         }
+
+        if (current.activity == RobotActivityState.WAKING) faceView?.setCaption(null)
+        faceView?.setRobotActivityState(current.activity, current.errorMessage)
     }
 
     @Suppress("DEPRECATION")
@@ -862,12 +886,5 @@ class MainActivity : Activity() {
         const val REQUEST_MICROPHONE = 4101
         const val REMINDER_SYNC_RETRY_MS = 30_000L
         const val ERROR_DISPLAY_MS = 1800L
-        val ACTIVE_FACE_STATES = setOf(
-            RobotActivityState.LISTENING,
-            RobotActivityState.THINKING,
-            RobotActivityState.SPEAKING,
-            RobotActivityState.PROACTIVE_SPEAKING,
-            RobotActivityState.ERROR
-        )
     }
 }

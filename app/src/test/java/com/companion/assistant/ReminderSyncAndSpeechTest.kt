@@ -58,7 +58,7 @@ class ReminderSyncAndSpeechTest {
     }
 
     @Test
-    fun proactiveSpeechRequiresEveryConsentAndIdleGateAndUsesTheSpeechRequest() {
+    fun proactiveSpeechRequiresEveryConsentAndAvailableStateAndUsesTheSpeechRequest() {
         val zone = java.util.TimeZone.getTimeZone("Europe/Istanbul")
         val now = java.util.Calendar.getInstance(zone).apply {
             set(2030, java.util.Calendar.JANUARY, 2, 2, 0, 0)
@@ -82,6 +82,10 @@ class ReminderSyncAndSpeechTest {
         assertTrue(flow.request("Proaktif ses testi.", allowed) { assertTrue(it) })
         assertEquals(1, requests)
         assertEquals("Proaktif ses testi.", spokenText)
+
+        assertNull(ProactiveSpeechGate.blockedReason(
+            settings, now, "Europe/Istanbul", RobotActivityState.SLEEPING, now
+        ))
 
         val activeListening = ProactiveSpeechGate.blockedReason(
             settings, now, "Europe/Istanbul", RobotActivityState.LISTENING, now

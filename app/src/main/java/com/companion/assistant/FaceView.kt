@@ -5,6 +5,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
@@ -41,6 +42,14 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
     }
     private val pupilPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val glintPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val closedEyeGlowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+    }
+    private val closedEyePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+    }
     private val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG).apply {
         textAlign = Paint.Align.CENTER
         typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
@@ -51,6 +60,7 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
     private val eyeRect = RectF()
     private val highlightRect = RectF()
     private val settingsHitRect = RectF()
+    private val closedEyePath = Path()
 
     private var panelGradient: LinearGradient? = null
     private var eyeGradient: LinearGradient? = null
@@ -63,6 +73,7 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
     private var caption = ""
     private var displayCaption = ""
     private var onFaceTapListener: (() -> Unit)? = null
+    private var onSleepRequestListener: (() -> Unit)? = null
     private var onSettingsTapListener: (() -> Unit)? = null
     private var settingsTouch = false
     private var running = false
@@ -106,6 +117,7 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
         stop()
         destroyed = true
         onFaceTapListener = null
+        onSleepRequestListener = null
         onSettingsTapListener = null
         handler.removeCallbacksAndMessages(null)
     }
@@ -114,19 +126,16 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
         onFaceTapListener = listener
     }
 
+    fun setOnSleepRequestListener(listener: (() -> Unit)?) {
+        onSleepRequestListener = listener
+    }
+
     fun setOnSettingsTapListener(listener: (() -> Unit)?) {
         onSettingsTapListener = listener
     }
 
-    fun showVoiceListening() = behavior.onVoiceListening()
-
-    fun showVoiceProcessing() = behavior.onVoiceProcessing()
-
-    fun showVoiceSpeaking() = behavior.onVoiceSpeaking()
-
-    fun showVoiceError(message: String) = behavior.onVoiceError(message)
-
-    fun finishVoiceInteraction() = behavior.finishVoiceInteraction()
+    internal fun setRobotActivityState(activity: RobotActivityState, errorMessage: String? = null) =
+        behavior.setActivityState(activity, errorMessage)
 
     internal fun setEmotionCue(cue: FaceCue) = behavior.setEmotionCue(cue)
 
@@ -154,6 +163,10 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
         requestAnimatedDraw()
     }
 
+    override fun requestSleep() {
+        onSleepRequestListener?.invoke()
+    }
+
     private fun requestAnimatedDraw() {
         if (!running || destroyed) return
         invalidate()
@@ -163,7 +176,7 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
     private fun scheduleFrame() {
         if (!running || destroyed || frameQueued) return
         frameQueued = true
-        val delayMs = if (animator.isSettledSleeping) 83L else 33L
+        val delayMs = if (animator.isSettledSleeping) SLEEP_FRAME_INTERVAL_MS else 33L
         handler.postDelayed(frameRunnable, delayMs)
     }
 
@@ -279,6 +292,15 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
     private fun drawEye(canvas: Canvas, centerX: Float, tilt: Float) {
         val currentWidth = eyeWidth * animator.eyeScaleX
         val openAmount = (1f - maxOf(animator.lidClosure, animator.blinkAmount)).coerceAtLeast(0.025f)
+        canvas.save()
+        if (tilt != 0f) canvas.rotate(tilt * 57.29578f, centerX, faceCenterY)
+
+        if (openAmount < CLOSED_EYE_THRESHOLD) {
+            drawClosedEye(canvas, centerX, currentWidth)
+            canvas.restore()
+            return
+        }
+
         val currentHeight = maxOf(dp(3f), eyeHeight * animator.eyeScaleY * openAmount)
         val corner = min(currentWidth * 0.28f, currentHeight * 0.47f)
         eyeRect.set(
@@ -287,9 +309,6 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
             centerX + currentWidth * 0.5f,
             faceCenterY + currentHeight * 0.5f
         )
-
-        canvas.save()
-        if (tilt != 0f) canvas.rotate(tilt * 57.29578f, centerX, faceCenterY)
 
         // Two translucent outlines create a restrained bloom without software shadows.
         eyeGlowPaint.color = GLOW_SOFT
@@ -338,21 +357,22 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
             )
         }
 
-        if (openAmount < 0.12f) {
-            detailPaint.style = Paint.Style.STROKE
-            detailPaint.strokeWidth = dp(1.4f)
-            detailPaint.color = CLOSED_EYE_LINE
-            canvas.drawLine(
-                eyeRect.left + currentWidth * 0.14f,
-                faceCenterY,
-                eyeRect.right - currentWidth * 0.14f,
-                faceCenterY,
-                detailPaint
-            )
-            detailPaint.style = Paint.Style.FILL
-        }
-
         canvas.restore()
+    }
+
+    private fun drawClosedEye(canvas: Canvas, centerX: Float, currentWidth: Float) {
+        val halfLine = currentWidth * 0.37f
+        val baseline = faceCenterY - dp(1f)
+        closedEyePath.reset()
+        closedEyePath.moveTo(centerX - halfLine, baseline - dp(1f))
+        closedEyePath.quadTo(centerX, baseline + dp(5f), centerX + halfLine, baseline - dp(1f))
+
+        closedEyeGlowPaint.color = CLOSED_EYE_GLOW
+        closedEyeGlowPaint.strokeWidth = dp(7f)
+        canvas.drawPath(closedEyePath, closedEyeGlowPaint)
+        closedEyePaint.color = CLOSED_EYE_LINE
+        closedEyePaint.strokeWidth = dp(1.8f)
+        canvas.drawPath(closedEyePath, closedEyePaint)
     }
 
     private fun drawStatus(canvas: Canvas) {
@@ -451,9 +471,12 @@ class FaceView(context: Context) : View(context), FaceBehavior.Listener {
         val IRIS_RING = 0xCCB5F6FF.toInt()
         val PUPIL = 0xFF082A43.toInt()
         val CLOSED_EYE_LINE = 0xAA70E8FF.toInt()
+        val CLOSED_EYE_GLOW = 0x3345CBFF
         val STATUS_COLOR = 0xCCB4D8E8.toInt()
         val CAPTION_COLOR = 0xFF85CBE1.toInt()
         val SUBTITLE_COLOR = 0x665B8198
+        const val CLOSED_EYE_THRESHOLD = 0.12f
+        const val SLEEP_FRAME_INTERVAL_MS = 250L
         const val MAX_CAPTION_CHARS = 240
     }
 }

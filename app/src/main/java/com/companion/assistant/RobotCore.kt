@@ -4,15 +4,25 @@ package com.companion.assistant
 internal enum class RobotActivityState {
     BOOTING,
     IDLE,
+    WAKING,
     LISTENING,
     THINKING,
     SPEAKING,
     PROACTIVE_SPEAKING,
+    RETURNING_TO_SLEEP,
     SLEEPING,
     OBSERVING,
     ACTING,
     ERROR,
     CLOSED
+}
+
+internal fun RobotActivityState.canStartProactiveSpeech(): Boolean =
+    this == RobotActivityState.IDLE || this == RobotActivityState.SLEEPING
+
+internal object RobotFaceTransitionTiming {
+    const val WAKE_ANIMATION_MS = 720L
+    const val SLEEP_ANIMATION_MS = 980L
 }
 
 /** Platform grants and user choices are explicit inputs; new capabilities default to disabled. */
@@ -49,6 +59,8 @@ internal sealed interface RobotEvent {
     data class TranscriptReady(val sessionId: Long, val hasText: Boolean) : RobotEvent
     data class ConversationReady(val sessionId: Long, val hasReply: Boolean) : RobotEvent
     data class SpeechCompleted(val sessionId: Long) : RobotEvent
+    data class WakeAnimationCompleted(val sessionId: Long) : RobotEvent
+    data class SleepAnimationCompleted(val sessionId: Long) : RobotEvent
     data object ProactiveReminderStarted : RobotEvent
     data class ProactiveReminderFinished(val sessionId: Long) : RobotEvent
     data class ProactiveReminderFailed(val sessionId: Long) : RobotEvent
@@ -103,10 +115,11 @@ internal class RobotCore(
         return current.sessionId == sessionId && current.activity == activity
     }
 
-    private fun reduce(event: RobotEvent): List<RobotEffect> = when (event) {
+    private fun reduce(event: RobotEvent): List<RobotEffect> {
+        return when (event) {
         RobotEvent.BootCompleted -> {
             if (snapshot.activity == RobotActivityState.BOOTING) {
-                snapshot = snapshot.copy(activity = RobotActivityState.IDLE)
+                snapshot = snapshot.copy(activity = RobotActivityState.SLEEPING)
             }
             emptyList()
         }
@@ -118,7 +131,7 @@ internal class RobotCore(
                 consent = snapshot.consent.copy(microphonePermissionGranted = event.granted)
             )
             when {
-                !event.granted && snapshot.activity in VOICE_STATES -> cancelToIdle()
+                !event.granted && snapshot.activity in VOICE_STATES -> cancelToSleep()
                 event.granted && waitingForMicrophonePermission -> {
                     if (hostResumed) {
                         waitingForMicrophonePermission = false
@@ -214,14 +227,35 @@ internal class RobotCore(
 
         is RobotEvent.SpeechCompleted -> {
             if (isCurrent(event.sessionId, RobotActivityState.SPEAKING)) {
+                beginReturningToSleep()
+            }
+            emptyList()
+        }
+
+        is RobotEvent.WakeAnimationCompleted -> {
+            if (!isCurrent(event.sessionId, RobotActivityState.WAKING)) return emptyList()
+            if (!hostResumed) {
+                enterSleepingImmediately()
+                emptyList()
+            } else if (snapshot.consent.microphonePermissionGranted) {
+                startListening()
+            } else {
+                waitingForMicrophonePermission = true
                 snapshot = snapshot.copy(activity = RobotActivityState.IDLE, errorMessage = null)
+                listOf(RobotEffect.RequestMicrophonePermission)
+            }
+        }
+
+        is RobotEvent.SleepAnimationCompleted -> {
+            if (isCurrent(event.sessionId, RobotActivityState.RETURNING_TO_SLEEP)) {
+                snapshot = snapshot.copy(activity = RobotActivityState.SLEEPING, errorMessage = null)
             }
             emptyList()
         }
 
         RobotEvent.ProactiveReminderStarted -> {
             val consent = snapshot.consent
-            if (hostResumed && snapshot.activity == RobotActivityState.IDLE && consent.autonomyEnabled &&
+            if (hostResumed && snapshot.activity.canStartProactiveSpeech() && consent.autonomyEnabled &&
                 consent.autonomousSpeechEnabled && !consent.quietHoursActive
             ) {
                 snapshot = snapshot.copy(
@@ -235,14 +269,14 @@ internal class RobotCore(
 
         is RobotEvent.ProactiveReminderFinished -> {
             if (isCurrent(event.sessionId, RobotActivityState.PROACTIVE_SPEAKING)) {
-                snapshot = snapshot.copy(activity = RobotActivityState.IDLE, errorMessage = null)
+                beginReturningToSleep()
             }
             emptyList()
         }
 
         is RobotEvent.ProactiveReminderFailed -> {
             if (isCurrent(event.sessionId, RobotActivityState.PROACTIVE_SPEAKING)) {
-                snapshot = snapshot.copy(activity = RobotActivityState.IDLE, errorMessage = null)
+                beginReturningToSleep()
             }
             emptyList()
         }
@@ -256,21 +290,21 @@ internal class RobotCore(
 
         is RobotEvent.ErrorDismissed -> {
             if (event.sessionId == snapshot.sessionId && snapshot.activity == RobotActivityState.ERROR) {
-                snapshot = snapshot.copy(activity = RobotActivityState.IDLE, errorMessage = null)
+                beginReturningToSleep()
             }
             emptyList()
         }
 
         RobotEvent.SleepRequested -> {
             if (snapshot.activity == RobotActivityState.IDLE) {
-                snapshot = snapshot.copy(activity = RobotActivityState.SLEEPING)
+                beginReturningToSleep()
             }
             emptyList()
         }
 
         RobotEvent.WakeRequested -> {
             if (snapshot.activity == RobotActivityState.SLEEPING) {
-                snapshot = snapshot.copy(activity = RobotActivityState.IDLE)
+                beginWaking()
             }
             emptyList()
         }
@@ -287,10 +321,16 @@ internal class RobotCore(
 
         RobotEvent.HostPaused -> {
             hostResumed = false
-            if (snapshot.activity in VOICE_STATES) cancelToIdle() else emptyList()
+            if (snapshot.activity in VOICE_STATES) cancelToSleepingImmediately()
+            else if (snapshot.activity == RobotActivityState.WAKING ||
+                snapshot.activity == RobotActivityState.RETURNING_TO_SLEEP
+            ) {
+                enterSleepingImmediately()
+                emptyList()
+            } else emptyList()
         }
 
-        RobotEvent.CancelActiveInteraction -> cancelToIdle()
+        RobotEvent.CancelActiveInteraction -> cancelToSleep()
 
         RobotEvent.CloseRequested -> {
             hostResumed = false
@@ -303,6 +343,7 @@ internal class RobotCore(
             )
             if (cancelEffect == null) emptyList() else listOf(cancelEffect)
         }
+        }
     }
 
     private fun handleFaceTapped(): List<RobotEffect> {
@@ -310,37 +351,29 @@ internal class RobotCore(
         if (!hostResumed || activity == RobotActivityState.BOOTING || activity == RobotActivityState.CLOSED) {
             return emptyList()
         }
-        if (activity == RobotActivityState.LISTENING) return cancelToIdle()
+        if (activity == RobotActivityState.LISTENING) return cancelToSleep()
+        if (activity == RobotActivityState.WAKING) return emptyList()
+        return beginWaking()
+    }
 
-        val oldSession = activeVoiceSession()
-        if (activity == RobotActivityState.SLEEPING || activity == RobotActivityState.ERROR) {
-            snapshot = snapshot.copy(activity = RobotActivityState.IDLE, errorMessage = null)
-        }
-
-        if (!snapshot.consent.microphonePermissionGranted) {
-            waitingForMicrophonePermission = true
-            val effects = mutableListOf<RobotEffect>()
-            if (oldSession != null) effects += RobotEffect.CancelVoiceSession(oldSession)
-            snapshot = snapshot.copy(
-                activity = RobotActivityState.IDLE,
-                sessionId = snapshot.sessionId + if (oldSession == null) 0L else 1L,
-                errorMessage = null
-            )
-            effects += RobotEffect.RequestMicrophonePermission
-            return effects
-        }
-
+    private fun beginWaking(): List<RobotEffect> {
         waitingForMicrophonePermission = false
-        val effects = mutableListOf<RobotEffect>()
-        if (oldSession != null) effects += RobotEffect.CancelVoiceSession(oldSession)
-        val nextSession = snapshot.sessionId + 1L
+        val activeSession = activeVoiceSession()
         snapshot = snapshot.copy(
-            activity = RobotActivityState.LISTENING,
-            sessionId = nextSession,
+            activity = RobotActivityState.WAKING,
+            sessionId = snapshot.sessionId + 1L,
             errorMessage = null
         )
-        effects += RobotEffect.StartListening(nextSession)
-        return effects
+        return activeSession?.let { listOf(RobotEffect.CancelVoiceSession(it)) }.orEmpty()
+    }
+
+    private fun beginReturningToSleep() {
+        waitingForMicrophonePermission = false
+        snapshot = snapshot.copy(
+            activity = RobotActivityState.RETURNING_TO_SLEEP,
+            sessionId = snapshot.sessionId + 1L,
+            errorMessage = null
+        )
     }
 
     private fun startListening(): List<RobotEffect> {
@@ -353,16 +386,28 @@ internal class RobotCore(
         return listOf(RobotEffect.StartListening(sessionId))
     }
 
-    private fun cancelToIdle(): List<RobotEffect> {
+    private fun cancelToSleep(): List<RobotEffect> {
+        waitingForMicrophonePermission = false
+        if (snapshot.activity == RobotActivityState.SLEEPING) return emptyList()
+        val activeSession = activeVoiceSession()
+        beginReturningToSleep()
+        return if (activeSession == null) emptyList() else listOf(RobotEffect.CancelVoiceSession(activeSession))
+    }
+
+    private fun cancelToSleepingImmediately(): List<RobotEffect> {
         waitingForMicrophonePermission = false
         val activeSession = activeVoiceSession()
-        if (activeSession == null && snapshot.activity == RobotActivityState.IDLE) return emptyList()
+        enterSleepingImmediately()
+        return activeSession?.let { listOf(RobotEffect.CancelVoiceSession(it)) }.orEmpty()
+    }
+
+    private fun enterSleepingImmediately() {
+        waitingForMicrophonePermission = false
         snapshot = snapshot.copy(
-            activity = RobotActivityState.IDLE,
-            sessionId = snapshot.sessionId + if (activeSession == null) 0L else 1L,
+            activity = RobotActivityState.SLEEPING,
+            sessionId = snapshot.sessionId + 1L,
             errorMessage = null
         )
-        return if (activeSession == null) emptyList() else listOf(RobotEffect.CancelVoiceSession(activeSession))
     }
 
     private fun activeVoiceSession(): Long? =

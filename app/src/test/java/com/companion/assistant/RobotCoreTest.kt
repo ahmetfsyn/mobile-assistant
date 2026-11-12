@@ -8,17 +8,37 @@ import org.junit.Test
 
 class RobotCoreTest {
     @Test
-    fun microphonePermissionIsRequestedBeforeListening() {
+    fun launchStartsSleepingAndFaceTapAnimatesBeforeListening() {
+        val core = readyCoreWithMicrophone()
+        assertEquals(RobotActivityState.SLEEPING, core.snapshot.activity)
+
+        assertTrue(core.dispatch(RobotEvent.FaceTapped).isEmpty())
+        assertEquals(RobotActivityState.WAKING, core.snapshot.activity)
+        val wakingSession = core.snapshot.sessionId
+        assertTrue(core.dispatch(RobotEvent.FaceTapped).isEmpty())
+        assertEquals(wakingSession, core.snapshot.sessionId)
+
+        assertEquals(
+            listOf(RobotEffect.StartListening(wakingSession + 1L)),
+            core.dispatch(RobotEvent.WakeAnimationCompleted(wakingSession))
+        )
+        assertEquals(RobotActivityState.LISTENING, core.snapshot.activity)
+    }
+
+    @Test
+    fun microphonePermissionIsRequestedAfterTheWakeAnimation() {
         val core = readyCore()
+        core.dispatch(RobotEvent.FaceTapped)
+        val wakingSession = core.snapshot.sessionId
+        assertEquals(RobotActivityState.WAKING, core.snapshot.activity)
 
         assertEquals(
             listOf(RobotEffect.RequestMicrophonePermission),
-            core.dispatch(RobotEvent.FaceTapped)
+            core.dispatch(RobotEvent.WakeAnimationCompleted(wakingSession))
         )
         assertEquals(RobotActivityState.IDLE, core.snapshot.activity)
-
         assertEquals(
-            listOf(RobotEffect.StartListening(1L)),
+            listOf(RobotEffect.StartListening(wakingSession + 1L)),
             core.dispatch(RobotEvent.MicrophonePermissionChanged(granted = true))
         )
         assertEquals(RobotActivityState.LISTENING, core.snapshot.activity)
@@ -26,64 +46,161 @@ class RobotCoreTest {
     }
 
     @Test
-    fun deniedMicrophonePermissionShowsRecoverableErrorWithoutStartingRecorder() {
+    fun deniedPermissionShowsErrorThenReturnsToSleep() {
         val core = readyCore()
         core.dispatch(RobotEvent.FaceTapped)
+        val wakingSession = core.snapshot.sessionId
+        core.dispatch(RobotEvent.WakeAnimationCompleted(wakingSession))
 
         assertTrue(core.dispatch(RobotEvent.MicrophonePermissionChanged(granted = false)).isEmpty())
         assertEquals(RobotActivityState.ERROR, core.snapshot.activity)
         assertEquals("MİKROFON İZNİ VERİLMEDİ", core.snapshot.errorMessage)
 
-        core.dispatch(RobotEvent.ErrorDismissed(core.snapshot.sessionId))
-        assertEquals(RobotActivityState.IDLE, core.snapshot.activity)
+        val errorSession = core.snapshot.sessionId
+        core.dispatch(RobotEvent.ErrorDismissed(errorSession))
+        assertEquals(RobotActivityState.RETURNING_TO_SLEEP, core.snapshot.activity)
+        core.dispatch(RobotEvent.SleepAnimationCompleted(core.snapshot.sessionId))
+        assertEquals(RobotActivityState.SLEEPING, core.snapshot.activity)
         assertNull(core.snapshot.errorMessage)
     }
 
     @Test
-    fun permissionGrantWhilePausedWaitsUntilActivityResumes() {
-        val core = readyCore()
-        core.dispatch(RobotEvent.FaceTapped)
-        core.dispatch(RobotEvent.HostPaused)
-
-        assertTrue(core.dispatch(RobotEvent.MicrophonePermissionChanged(granted = true)).isEmpty())
-        assertEquals(RobotActivityState.IDLE, core.snapshot.activity)
-        assertEquals(
-            listOf(RobotEffect.StartListening(1L)),
-            core.dispatch(RobotEvent.HostResumed)
-        )
-        assertEquals(RobotActivityState.LISTENING, core.snapshot.activity)
-    }
-
-    @Test
-    fun voiceTurnTransitionsThroughThinkingAndSpeaking() {
+    fun voiceInteractionUsesCoreStatesAndSleepsOnlyAfterSpeechCompletes() {
         val core = readyCoreWithMicrophone()
-        val start = core.dispatch(RobotEvent.FaceTapped).single() as RobotEffect.StartListening
+        val started = startListening(core)
         assertEquals(RobotActivityState.LISTENING, core.snapshot.activity)
 
-        core.dispatch(RobotEvent.RecordingCompleted(start.sessionId))
+        core.dispatch(RobotEvent.RecordingCompleted(started.sessionId))
         assertEquals(RobotActivityState.THINKING, core.snapshot.activity)
-        core.dispatch(RobotEvent.TranscriptReady(start.sessionId, hasText = true))
-        core.dispatch(RobotEvent.ConversationReady(start.sessionId, hasReply = true))
+        core.dispatch(RobotEvent.TranscriptReady(started.sessionId, hasText = true))
+        core.dispatch(RobotEvent.ConversationReady(started.sessionId, hasReply = true))
         assertEquals(RobotActivityState.SPEAKING, core.snapshot.activity)
 
-        core.dispatch(RobotEvent.SpeechCompleted(start.sessionId))
-        assertEquals(RobotActivityState.IDLE, core.snapshot.activity)
-        assertNull(core.snapshot.errorMessage)
+        core.dispatch(RobotEvent.SleepRequested)
+        assertEquals(RobotActivityState.SPEAKING, core.snapshot.activity)
+        core.dispatch(RobotEvent.SpeechCompleted(started.sessionId))
+        assertEquals(RobotActivityState.RETURNING_TO_SLEEP, core.snapshot.activity)
+
+        core.dispatch(RobotEvent.SleepAnimationCompleted(core.snapshot.sessionId))
+        assertEquals(RobotActivityState.SLEEPING, core.snapshot.activity)
     }
 
     @Test
-    fun platformTranscriptMovesDirectlyFromListeningToThinking() {
+    fun tappingDuringSpeechCancelsTtsAndIgnoresItsLateCompletion() {
         val core = readyCoreWithMicrophone()
-        val start = core.dispatch(RobotEvent.FaceTapped).single() as RobotEffect.StartListening
+        val started = startListening(core)
+        core.dispatch(RobotEvent.RecordingCompleted(started.sessionId))
+        core.dispatch(RobotEvent.TranscriptReady(started.sessionId, hasText = true))
+        core.dispatch(RobotEvent.ConversationReady(started.sessionId, hasReply = true))
+        assertEquals(RobotActivityState.SPEAKING, core.snapshot.activity)
+
+        assertEquals(
+            listOf(RobotEffect.CancelVoiceSession(started.sessionId)),
+            core.dispatch(RobotEvent.FaceTapped)
+        )
+        assertEquals(RobotActivityState.WAKING, core.snapshot.activity)
+
+        core.dispatch(RobotEvent.SpeechCompleted(started.sessionId))
+        assertEquals(RobotActivityState.WAKING, core.snapshot.activity)
+        assertTrue(core.dispatch(RobotEvent.WakeAnimationCompleted(core.snapshot.sessionId)).single()
+            is RobotEffect.StartListening)
+        assertEquals(RobotActivityState.LISTENING, core.snapshot.activity)
+    }
+
+    @Test
+    fun staleWakeCompletionIsIgnoredAfterCancellation() {
+        val core = readyCoreWithMicrophone()
+        core.dispatch(RobotEvent.FaceTapped)
+        val wakingSession = core.snapshot.sessionId
+        core.dispatch(RobotEvent.CancelActiveInteraction)
+        assertEquals(RobotActivityState.RETURNING_TO_SLEEP, core.snapshot.activity)
+
+        core.dispatch(RobotEvent.WakeAnimationCompleted(wakingSession))
+        assertEquals(RobotActivityState.RETURNING_TO_SLEEP, core.snapshot.activity)
+        core.dispatch(RobotEvent.SleepAnimationCompleted(core.snapshot.sessionId))
+        assertEquals(RobotActivityState.SLEEPING, core.snapshot.activity)
+    }
+
+    @Test
+    fun tappingDuringListeningCancelsAndReturnsToSleep() {
+        val core = readyCoreWithMicrophone()
+        val started = startListening(core)
+
+        assertEquals(
+            listOf(RobotEffect.CancelVoiceSession(started.sessionId)),
+            core.dispatch(RobotEvent.FaceTapped)
+        )
+        assertEquals(RobotActivityState.RETURNING_TO_SLEEP, core.snapshot.activity)
+        core.dispatch(RobotEvent.SleepAnimationCompleted(core.snapshot.sessionId))
+        assertEquals(RobotActivityState.SLEEPING, core.snapshot.activity)
+    }
+
+    @Test
+    fun tappingDuringThinkingCancelsOldSessionThenWakesIntoNewListeningSession() {
+        val core = readyCoreWithMicrophone()
+        val first = startListening(core)
+        core.dispatch(RobotEvent.RecordingCompleted(first.sessionId))
+
+        assertEquals(
+            listOf(RobotEffect.CancelVoiceSession(first.sessionId)),
+            core.dispatch(RobotEvent.FaceTapped)
+        )
+        assertEquals(RobotActivityState.WAKING, core.snapshot.activity)
+        val wakeSession = core.snapshot.sessionId
+        assertEquals(
+            listOf(RobotEffect.StartListening(wakeSession + 1L)),
+            core.dispatch(RobotEvent.WakeAnimationCompleted(wakeSession))
+        )
         assertEquals(RobotActivityState.LISTENING, core.snapshot.activity)
 
-        core.dispatch(RobotEvent.TranscriptReady(start.sessionId, hasText = true))
-        assertEquals(RobotActivityState.THINKING, core.snapshot.activity)
+        core.dispatch(RobotEvent.ConversationReady(first.sessionId, hasReply = true))
+        assertEquals(RobotActivityState.LISTENING, core.snapshot.activity)
     }
 
     @Test
-    fun proactiveReminderRequiresAutonomySpeechConsentQuietHoursToBeOverAndIdleCore() {
+    fun speechRecognitionFailureReturnsThroughErrorAndSleepStates() {
         val core = readyCoreWithMicrophone()
+        val started = startListening(core)
+        core.dispatch(RobotEvent.SessionFailed(started.sessionId, "TANIMA HATASI"))
+        assertEquals(RobotActivityState.ERROR, core.snapshot.activity)
+
+        core.dispatch(RobotEvent.ErrorDismissed(core.snapshot.sessionId))
+        assertEquals(RobotActivityState.RETURNING_TO_SLEEP, core.snapshot.activity)
+        core.dispatch(RobotEvent.SleepAnimationCompleted(core.snapshot.sessionId))
+        assertEquals(RobotActivityState.SLEEPING, core.snapshot.activity)
+    }
+
+    @Test
+    fun pausingDuringVoiceCancelsSessionAndSettlesImmediatelyToSleep() {
+        val core = readyCoreWithMicrophone()
+        val started = startListening(core)
+
+        assertEquals(
+            listOf(RobotEffect.CancelVoiceSession(started.sessionId)),
+            core.dispatch(RobotEvent.HostPaused)
+        )
+        assertEquals(RobotActivityState.SLEEPING, core.snapshot.activity)
+        assertFalse(core.isCurrent(started.sessionId, RobotActivityState.LISTENING))
+
+        core.dispatch(RobotEvent.ConversationReady(started.sessionId, hasReply = true))
+        assertEquals(RobotActivityState.SLEEPING, core.snapshot.activity)
+    }
+
+    @Test
+    fun pausingDuringWakeIgnoresLateWakeAnimationCallback() {
+        val core = readyCoreWithMicrophone()
+        core.dispatch(RobotEvent.FaceTapped)
+        val wakingSession = core.snapshot.sessionId
+        core.dispatch(RobotEvent.HostPaused)
+
+        assertEquals(RobotActivityState.SLEEPING, core.snapshot.activity)
+        core.dispatch(RobotEvent.WakeAnimationCompleted(wakingSession))
+        assertEquals(RobotActivityState.SLEEPING, core.snapshot.activity)
+    }
+
+    @Test
+    fun remindersCanSpeakFromSleepAndThenReturnTheFaceToSleep() {
+        val core = readyCore()
         core.dispatch(RobotEvent.AutonomyEnabledChanged(true))
         core.dispatch(RobotEvent.AutonomousSpeechConsentChanged(true))
         core.dispatch(RobotEvent.QuietHoursChanged(false))
@@ -92,83 +209,39 @@ class RobotCoreTest {
         assertEquals(RobotActivityState.PROACTIVE_SPEAKING, core.snapshot.activity)
         val session = core.snapshot.sessionId
         core.dispatch(RobotEvent.ProactiveReminderFinished(session))
-        assertEquals(RobotActivityState.IDLE, core.snapshot.activity)
+        assertEquals(RobotActivityState.RETURNING_TO_SLEEP, core.snapshot.activity)
+        core.dispatch(RobotEvent.SleepAnimationCompleted(core.snapshot.sessionId))
+        assertEquals(RobotActivityState.SLEEPING, core.snapshot.activity)
+    }
+
+    @Test
+    fun proactiveSpeechRequiresConsentQuietHoursAndAvailableCoreState() {
+        val core = readyCoreWithMicrophone()
+        core.dispatch(RobotEvent.AutonomyEnabledChanged(true))
+        core.dispatch(RobotEvent.AutonomousSpeechConsentChanged(true))
+        core.dispatch(RobotEvent.QuietHoursChanged(false))
+
+        core.dispatch(RobotEvent.ProactiveReminderStarted)
+        assertEquals(RobotActivityState.PROACTIVE_SPEAKING, core.snapshot.activity)
+        core.dispatch(RobotEvent.ProactiveReminderFinished(core.snapshot.sessionId))
+        finishSleep(core)
 
         core.dispatch(RobotEvent.QuietHoursChanged(true))
         core.dispatch(RobotEvent.ProactiveReminderStarted)
-        assertEquals(RobotActivityState.IDLE, core.snapshot.activity)
+        assertEquals(RobotActivityState.SLEEPING, core.snapshot.activity)
         core.dispatch(RobotEvent.QuietHoursChanged(false))
         core.dispatch(RobotEvent.AutonomyEnabledChanged(false))
         core.dispatch(RobotEvent.ProactiveReminderStarted)
-        assertEquals(RobotActivityState.IDLE, core.snapshot.activity)
+        assertEquals(RobotActivityState.SLEEPING, core.snapshot.activity)
 
         core.dispatch(RobotEvent.AutonomyEnabledChanged(true))
-        val voiceSession = core.dispatch(RobotEvent.FaceTapped).single() as RobotEffect.StartListening
+        core.dispatch(RobotEvent.FaceTapped)
+        val wakeSession = core.snapshot.sessionId
+        core.dispatch(RobotEvent.WakeAnimationCompleted(wakeSession))
+        val voiceSession = core.snapshot.sessionId
         core.dispatch(RobotEvent.ProactiveReminderStarted)
         assertEquals(RobotActivityState.LISTENING, core.snapshot.activity)
-        assertEquals(voiceSession.sessionId, core.snapshot.sessionId)
-    }
-
-    @Test
-    fun emptyPlatformTranscriptShowsRecoverableError() {
-        val core = readyCoreWithMicrophone()
-        val start = core.dispatch(RobotEvent.FaceTapped).single() as RobotEffect.StartListening
-
-        core.dispatch(RobotEvent.TranscriptReady(start.sessionId, hasText = false))
-
-        assertEquals(RobotActivityState.ERROR, core.snapshot.activity)
-        assertEquals("KONUŞMA ANLAŞILAMADI", core.snapshot.errorMessage)
-    }
-
-    @Test
-    fun newTapCancelsOldSessionAndRejectsItsLateEvents() {
-        val core = readyCoreWithMicrophone()
-        val first = core.dispatch(RobotEvent.FaceTapped).single() as RobotEffect.StartListening
-        core.dispatch(RobotEvent.RecordingCompleted(first.sessionId))
-
-        assertEquals(
-            listOf(
-                RobotEffect.CancelVoiceSession(first.sessionId),
-                RobotEffect.StartListening(first.sessionId + 1L)
-            ),
-            core.dispatch(RobotEvent.FaceTapped)
-        )
-        assertEquals(first.sessionId + 1L, core.snapshot.sessionId)
-        assertEquals(RobotActivityState.LISTENING, core.snapshot.activity)
-
-        core.dispatch(RobotEvent.ConversationReady(first.sessionId, hasReply = true))
-        assertEquals(RobotActivityState.LISTENING, core.snapshot.activity)
-    }
-
-    @Test
-    fun hostPauseCancelsActiveSessionAndIgnoresLateResponse() {
-        val core = readyCoreWithMicrophone()
-        val started = core.dispatch(RobotEvent.FaceTapped).single() as RobotEffect.StartListening
-
-        assertEquals(
-            listOf(RobotEffect.CancelVoiceSession(started.sessionId)),
-            core.dispatch(RobotEvent.HostPaused)
-        )
-        assertEquals(RobotActivityState.IDLE, core.snapshot.activity)
-        assertFalse(core.isCurrent(started.sessionId, RobotActivityState.LISTENING))
-
-        core.dispatch(RobotEvent.ConversationReady(started.sessionId, hasReply = true))
-        assertEquals(RobotActivityState.IDLE, core.snapshot.activity)
-    }
-
-    @Test
-    fun cancellingForDiagnosticsKeepsHostAvailableForNextFaceTap() {
-        val core = readyCoreWithMicrophone()
-        val first = core.dispatch(RobotEvent.FaceTapped).single() as RobotEffect.StartListening
-
-        assertEquals(
-            listOf(RobotEffect.CancelVoiceSession(first.sessionId)),
-            core.dispatch(RobotEvent.CancelActiveInteraction)
-        )
-        assertEquals(
-            listOf(RobotEffect.StartListening(first.sessionId + 2L)),
-            core.dispatch(RobotEvent.FaceTapped)
-        )
+        assertEquals(voiceSession, core.snapshot.sessionId)
     }
 
     @Test
@@ -191,13 +264,22 @@ class RobotCoreTest {
     }
 
     @Test
-    fun sleepAndWakeAreSerializedStateTransitions() {
-        val core = readyCore()
-        core.dispatch(RobotEvent.SleepRequested)
-        assertEquals(RobotActivityState.SLEEPING, core.snapshot.activity)
-
-        core.dispatch(RobotEvent.WakeRequested)
-        assertEquals(RobotActivityState.IDLE, core.snapshot.activity)
+    fun facePresentationMatchesSleepWakeAndVoiceState() {
+        assertEquals(FaceExpression.SLEEPING, RobotFacePresenter.forActivity(RobotActivityState.SLEEPING).expression)
+        assertEquals(FaceExpression.ATTENTIVE, RobotFacePresenter.forActivity(RobotActivityState.WAKING).expression)
+        assertEquals(FaceExpression.ATTENTIVE, RobotFacePresenter.forActivity(RobotActivityState.LISTENING).expression)
+        assertEquals(FaceExpression.CURIOUS, RobotFacePresenter.forActivity(RobotActivityState.THINKING).expression)
+        assertEquals(FaceExpression.HAPPY, RobotFacePresenter.forActivity(RobotActivityState.SPEAKING).expression)
+        assertEquals(
+            FaceExpression.HAPPY,
+            RobotFacePresenter.forActivity(RobotActivityState.PROACTIVE_SPEAKING).expression
+        )
+        assertEquals(
+            FaceExpression.SLEEPING,
+            RobotFacePresenter.forActivity(RobotActivityState.RETURNING_TO_SLEEP).expression
+        )
+        assertTrue(RobotFacePresenter.forActivity(RobotActivityState.WAKING).durationMs > 0L)
+        assertTrue(RobotFacePresenter.forActivity(RobotActivityState.RETURNING_TO_SLEEP).durationMs > 0L)
     }
 
     private fun readyCore(): RobotCore = RobotCore().apply {
@@ -207,5 +289,15 @@ class RobotCoreTest {
 
     private fun readyCoreWithMicrophone(): RobotCore = readyCore().apply {
         dispatch(RobotEvent.MicrophonePermissionChanged(granted = true))
+    }
+
+    private fun startListening(core: RobotCore): RobotEffect.StartListening {
+        core.dispatch(RobotEvent.FaceTapped)
+        return core.dispatch(RobotEvent.WakeAnimationCompleted(core.snapshot.sessionId))
+            .single() as RobotEffect.StartListening
+    }
+
+    private fun finishSleep(core: RobotCore) {
+        core.dispatch(RobotEvent.SleepAnimationCompleted(core.snapshot.sessionId))
     }
 }
