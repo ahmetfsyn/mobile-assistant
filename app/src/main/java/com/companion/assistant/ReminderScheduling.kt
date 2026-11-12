@@ -48,7 +48,8 @@ internal class ReminderScheduler(context: Context, private val store: ReminderSt
 
     fun defer(reminderId: String, expectedAt: Long, retryAt: Long, failedAttempt: Boolean) {
         store.defer(reminderId, expectedAt, retryAt, failedAttempt)?.let { updated ->
-            if (updated.status == STATUS_SCHEDULED) schedule(updated) else ReminderNotifications.post(appContext, updated, "Hatırlatma teslim edilemedi. Uygulamadan tekrar deneyebilirsin.")
+            if (updated.status == STATUS_SCHEDULED) schedule(updated)
+            else ReminderNotifications.post(appContext, updated, ReminderNotificationKind.FAILED)
         }
     }
 
@@ -125,7 +126,7 @@ class ReminderAlarmReceiver : BroadcastReceiver() {
         }
         val reminder = store.claimDue(id, expectedAt, now) ?: return
         if (reminder.status == "needs_attention") {
-            if (ReminderNotifications.post(context, reminder, "Hatırlatma teslim edilemedi. Uygulamadan tekrar deneyebilirsin.")) {
+            if (ReminderNotifications.post(context, reminder, ReminderNotificationKind.FAILED)) {
                 store.markDelivered(id, expectedAt, now)?.let { syncDeliveredReminder(context, it) }
                 scheduler.scheduleAll()
             }
@@ -188,8 +189,13 @@ class ReminderRescheduleReceiver : BroadcastReceiver() {
 internal object ReminderNotifications {
     private const val CHANNEL_ID = "companion_reminders"
     private const val CHANNEL_NAME = "Hatırlatmalar"
+    const val EXTRA_REMINDER_ID = "com.companion.assistant.extra.REMINDER_NOTIFICATION_ID"
 
-    fun post(context: Context, reminder: ReminderRecord, overrideText: String? = null): Boolean {
+    fun post(
+        context: Context,
+        reminder: ReminderRecord,
+        kind: ReminderNotificationKind = ReminderNotificationKind.DUE
+    ): Boolean {
         return try {
             val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -199,16 +205,19 @@ internal object ReminderNotifications {
                 })
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && !manager.areNotificationsEnabled()) return false
-            val open = Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            val copy = ReminderNotificationFormatter.format(reminder, kind)
+            val open = Intent(context, MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                .putExtra(EXTRA_REMINDER_ID, reminder.id)
             val contentIntent = PendingIntent.getActivity(
                 context, reminder.id.hashCode(), open,
                 PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
             )
             val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) Notification.Builder(context, CHANNEL_ID) else Notification.Builder(context)
             val notification = builder.setSmallIcon(android.R.drawable.ic_dialog_info)
-                .setContentTitle("Masa Arkadaşı")
-                .setContentText(overrideText ?: reminder.message)
-                .setStyle(Notification.BigTextStyle().bigText(overrideText ?: reminder.message))
+                .setContentTitle(copy.title)
+                .setContentText(copy.body)
+                .setStyle(Notification.BigTextStyle().bigText(copy.body))
                 .setContentIntent(contentIntent)
                 .setAutoCancel(true)
                 .setDefaults(0)

@@ -16,6 +16,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.text.InputType
+import android.util.Log
 import android.view.View
 import android.view.WindowManager
 import android.widget.Button
@@ -46,6 +47,7 @@ class MainActivity : Activity() {
     private var reminderManagerDialog: ReminderManagerDialog? = null
     private var reminderReceiverRegistered = false
     private var reminderNetworkCallback: ConnectivityManager.NetworkCallback? = null
+    private var pendingReminderNotificationId: String? = null
     private val reminderSyncExecutor: ExecutorService = Executors.newSingleThreadExecutor { task ->
         Thread(task, "companion-reminder-sync").apply { isDaemon = true }
     }
@@ -130,8 +132,16 @@ class MainActivity : Activity() {
         face.setOnFaceTapListener { onFaceTapped() }
         face.setOnSettingsTapListener { showSecuritySettings(authenticationRequired = false) }
         setContentView(face)
+        pendingReminderNotificationId = intent?.getStringExtra(ReminderNotifications.EXTRA_REMINDER_ID)
         dispatchRobotEvent(RobotEvent.BootCompleted)
         dispatchRobotEvent(RobotEvent.MicrophonePermissionChanged(hasMicrophonePermission()))
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        pendingReminderNotificationId = intent.getStringExtra(ReminderNotifications.EXTRA_REMINDER_ID)
+        if (ReminderHost.isVisible) speakPendingReminderNotification()
     }
 
     override fun onResume() {
@@ -149,6 +159,7 @@ class MainActivity : Activity() {
         reminderScheduler?.scheduleAll()
         retryPendingReminderSyncs()
         faceView?.start()
+        mainHandler.post(::speakPendingReminderNotification)
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -476,7 +487,7 @@ class MainActivity : Activity() {
         }
         ReminderNotifications.cancel(this, id)
         ProactiveSpeechFlow { text, callback -> started.speakProactiveReminder(text, callback) }
-            .request(reminder.message, allowed = true) { spoke ->
+            .request(reminder.announcement(), allowed = true) { spoke ->
             val finishedAt = System.currentTimeMillis()
             if (spoke) {
                 store.markDelivered(id, expectedAt, finishedAt)
@@ -487,7 +498,7 @@ class MainActivity : Activity() {
                 scheduler.defer(id, expectedAt, finishedAt + ReminderScheduler.RETRY_DELAY_MS, failedAttempt = true)
                 val afterFailure = store.get(id)
                 if (afterFailure?.status == "needs_attention") {
-                    if (ReminderNotifications.post(this, afterFailure)) {
+                    if (ReminderNotifications.post(this, afterFailure, ReminderNotificationKind.FAILED)) {
                         store.markDelivered(id, expectedAt, finishedAt)
                         scheduler.scheduleAll()
                         syncReminderState(store.get(id))
@@ -526,6 +537,33 @@ class MainActivity : Activity() {
             }
         }
         if (!accepted) Toast.makeText(this, "Ses testi başlatılamadı.", Toast.LENGTH_LONG).show()
+    }
+
+    /** Notification taps use the same announcement and the existing proactive speech safety gates. */
+    private fun speakPendingReminderNotification() {
+        val id = pendingReminderNotificationId ?: return
+        pendingReminderNotificationId = null
+        val reminder = reminderStore?.get(id) ?: return
+        val settings = reminderSettingsStore?.get() ?: return
+        val now = System.currentTimeMillis()
+        val zoneId = java.util.TimeZone.getDefault().id
+        val cooldown = ReminderCooldownStore(applicationContext)
+        val activity = robotCore?.snapshot?.activity ?: RobotActivityState.ERROR
+        val blocked = ProactiveSpeechGate.blockedReason(
+            settings, now, zoneId, activity, cooldown.nextAllowedAt(now)
+        )
+        if (blocked != null) {
+            Log.i("ReminderAnnouncement", "notification_speech_skipped reason=$blocked")
+            return
+        }
+        val controller = voiceController ?: return
+        val accepted = ProactiveSpeechFlow { text, callback ->
+            controller.speakProactiveReminder(text, callback)
+        }.request(reminder.announcement(), allowed = true) { spoke ->
+            if (spoke) cooldown.markSpoken(System.currentTimeMillis())
+            else Log.w("ReminderAnnouncement", "notification_speech_failed")
+        }
+        if (!accepted) Log.w("ReminderAnnouncement", "notification_speech_rejected")
     }
 
     private fun syncReminderState(reminder: ReminderRecord?) {
