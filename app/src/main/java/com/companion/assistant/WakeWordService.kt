@@ -469,8 +469,31 @@ internal class VoskWakeWordEngine(modelDirectory: File) : WakeWordEngine {
         val audio = utteranceAudio.toByteArray()
         utteranceAudio.erase()
         val audioDurationMs = audio.size * 1_000L / (WakeWordMonitor.SAMPLE_RATE_HZ * 2L)
-        if (WakeWordFastPathPolicy.canSkipCommandConfirmation(confidence, audioDurationMs)) {
-            Log.i(TAG, "wake_confirmation_skipped reason=short_confident_wake audio_ms=$audioDurationMs")
+        val firstWord = result.optJSONArray("result")?.optJSONObject(0)
+        val firstWordStart = firstWord?.optDouble("start")?.takeIf { firstWord.has("start") }
+        val firstWordEnd = firstWord?.optDouble("end")?.takeIf { firstWord.has("end") }
+        val wakeAudio = WakeWordAudioWindow.aroundFirstWord(audio, firstWordStart, firstWordEnd)
+        val wakeAudioDurationMs = wakeAudio.size * 1_000L / (WakeWordMonitor.SAMPLE_RATE_HZ * 2L)
+        val shortConfirmationStartedAt = SystemClock.elapsedRealtime()
+        val wakeConfirmation = try {
+            decodeCommandFromSameUtterance(wakeAudio)
+        } finally {
+            wakeAudio.fill(0)
+        }
+        val shortConfirmationDurationMs = SystemClock.elapsedRealtime() - shortConfirmationStartedAt
+        Log.i(TAG, "wake_word_confirmation duration_ms=$shortConfirmationDurationMs audio_ms=$wakeAudioDurationMs timing_available=${firstWordStart != null && firstWordEnd != null} exact=${wakeConfirmation.exactWakeWord} similar_name=${wakeConfirmation.similarName}")
+        if (wakeConfirmation.similarName) {
+            Log.i(TAG, "wake_candidate_rejected reason=similar_name confidence=$confidence")
+            audio.fill(0)
+            return null
+        }
+        if (!wakeConfirmation.exactWakeWord) {
+            Log.i(TAG, "wake_candidate_rejected reason=word_not_exactly_confirmed confidence=$confidence")
+            audio.fill(0)
+            return null
+        }
+
+        if (WakeWordFastPathPolicy.isShortUtterance(audioDurationMs)) {
             Log.i(TAG, "wake_candidate_accepted confidence=$confidence command_handoff=false")
             audio.fill(0)
             return "Ayşe"
@@ -483,14 +506,14 @@ internal class VoskWakeWordEngine(modelDirectory: File) : WakeWordEngine {
             audio.fill(0)
         }
         val confirmationDurationMs = SystemClock.elapsedRealtime() - confirmationStartedAt
-        Log.i(TAG, "wake_confirmation duration_ms=$confirmationDurationMs audio_ms=$audioDurationMs similar_name=${commandDecode.similarName} command_handoff=${!commandDecode.transcript.isNullOrBlank()}")
+        Log.i(TAG, "wake_command_decode duration_ms=$confirmationDurationMs audio_ms=$audioDurationMs exact=${commandDecode.exactWakeWord} similar_name=${commandDecode.similarName} command_handoff=${!commandDecode.transcript.isNullOrBlank()}")
         if (commandDecode.similarName) {
             Log.i(TAG, "wake_candidate_rejected reason=similar_name confidence=$confidence")
             return null
         }
         val commandTranscript = commandDecode.transcript
-        if (commandTranscript.isNullOrBlank() && !WakeWordConfidencePolicy.allowsWakeOnlyFallback(confidence)) {
-            Log.i(TAG, "wake_candidate_rejected reason=low_confidence_unconfirmed confidence=$confidence")
+        if (commandTranscript.isNullOrBlank() && !commandDecode.exactWakeWord) {
+            Log.i(TAG, "wake_candidate_rejected reason=not_exactly_confirmed confidence=$confidence")
             return null
         }
         Log.i(TAG, "wake_candidate_accepted confidence=$confidence command_handoff=${!commandTranscript.isNullOrBlank()}")
@@ -515,7 +538,8 @@ internal class VoskWakeWordEngine(modelDirectory: File) : WakeWordEngine {
             }
             if (WakeWordMatcher.isKnownConfusableStart(resultText)) return CommandDecode(similarName = true)
             val match = WakeWordMatcher.match(resultText) ?: return CommandDecode()
-            if (match.commandTranscript?.contains("[unk]") == true) CommandDecode() else CommandDecode(resultText)
+            if (match.commandTranscript?.contains("[unk]") == true) return CommandDecode()
+            if (match.commandTranscript == null) CommandDecode(exactWakeWord = true) else CommandDecode(resultText)
         } catch (error: RuntimeException) {
             Log.w(TAG, "wake_command_handoff_failed type=${error.javaClass.simpleName}")
             CommandDecode()
@@ -526,7 +550,8 @@ internal class VoskWakeWordEngine(modelDirectory: File) : WakeWordEngine {
 
     private data class CommandDecode(
         val transcript: String? = null,
-        val similarName: Boolean = false
+        val similarName: Boolean = false,
+        val exactWakeWord: Boolean = false
     )
 
     private companion object {

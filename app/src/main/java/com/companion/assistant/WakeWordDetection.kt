@@ -9,11 +9,8 @@ internal data class WakeWordRecognition(val commandTranscript: String?)
 
 internal object WakeWordConfidencePolicy {
     const val MINIMUM_CONFIDENCE = 0.55
-    const val WAKE_ONLY_FALLBACK_CONFIDENCE = 0.90
 
     fun accepts(confidence: Double): Boolean = confidence >= MINIMUM_CONFIDENCE
-
-    fun allowsWakeOnlyFallback(confidence: Double): Boolean = confidence >= WAKE_ONLY_FALLBACK_CONFIDENCE
 }
 
 /** A completed utterance must start with the standalone Turkish wake word Ayşe. */
@@ -80,13 +77,37 @@ internal object WakeWordAudioStartRetryPolicy {
     fun shouldRetry(attempt: Int): Boolean = attempt in 1..MAX_RETRIES
 }
 
-/** Avoid a second full-model pass for a short, confident wake-only utterance. */
+/** Identifies short utterances that can start listening without decoding a full command. */
 internal object WakeWordFastPathPolicy {
-    const val MINIMUM_CONFIDENCE = 0.85
-    const val MAX_AUDIO_DURATION_MS = 1_600L
+    const val MAX_AUDIO_DURATION_MS = 2_000L
 
-    fun canSkipCommandConfirmation(confidence: Double, audioDurationMs: Long): Boolean =
-        confidence >= MINIMUM_CONFIDENCE && audioDurationMs in 1..MAX_AUDIO_DURATION_MS
+    fun isShortUtterance(audioDurationMs: Long): Boolean = audioDurationMs in 1..MAX_AUDIO_DURATION_MS
+}
+
+/** Copies a short PCM window around Vosk's first-word timing, with context for acoustic confirmation. */
+internal object WakeWordAudioWindow {
+    fun aroundFirstWord(
+        audio: ByteArray,
+        startSeconds: Double?,
+        endSeconds: Double?,
+        sampleRateHz: Int = WakeWordMonitor.SAMPLE_RATE_HZ,
+        paddingMs: Long = 150L,
+        maxWindowMs: Long = 1_200L
+    ): ByteArray {
+        if (startSeconds == null || endSeconds == null || !startSeconds.isFinite() || !endSeconds.isFinite() ||
+            startSeconds < 0.0 || endSeconds <= startSeconds || sampleRateHz <= 0
+        ) return audio.copyOf()
+
+        val bytesPerSecond = sampleRateHz * 2L
+        val paddingBytes = bytesPerSecond * paddingMs / 1_000L
+        val startByte = ((startSeconds * bytesPerSecond).toLong() - paddingBytes)
+            .coerceAtLeast(0L).toInt() and -2
+        val requestedEndByte = (endSeconds * bytesPerSecond).toLong() + paddingBytes
+        val maxEndByte = startByte.toLong() + bytesPerSecond * maxWindowMs / 1_000L
+        val endByte = requestedEndByte.coerceAtMost(maxEndByte).coerceAtMost(audio.size.toLong()).toInt() and -2
+        if (endByte <= startByte) return audio.copyOf()
+        return audio.copyOfRange(startByte, endByte)
+    }
 }
 
 /** Blocking worker-thread loop. Audio, model, and exclusive microphone lease are always released. */

@@ -18,11 +18,31 @@ class WakeWordDetectionTest {
     }
 
     @Test
-    fun fastWakePathSkipsSecondDecodeOnlyForShortConfidentUtterances() {
-        assertTrue(WakeWordFastPathPolicy.canSkipCommandConfirmation(0.886, 1_408))
-        assertFalse(WakeWordFastPathPolicy.canSkipCommandConfirmation(0.849, 1_408))
-        assertFalse(WakeWordFastPathPolicy.canSkipCommandConfirmation(0.99, 1_601))
-        assertFalse(WakeWordFastPathPolicy.canSkipCommandConfirmation(0.99, 0))
+    fun fastWakePathOnlySkipsFullCommandDecodeForShortUtterances() {
+        assertTrue(WakeWordFastPathPolicy.isShortUtterance(1_408))
+        assertTrue(WakeWordFastPathPolicy.isShortUtterance(1_601))
+        assertFalse(WakeWordFastPathPolicy.isShortUtterance(2_001))
+        assertFalse(WakeWordFastPathPolicy.isShortUtterance(0))
+    }
+
+    @Test
+    fun shortWakeConfirmationUsesWordWindowWithPaddingAndAlignedSamples() {
+        val audio = ByteArray(64_000) { (it % 127).toByte() }
+        val window = WakeWordAudioWindow.aroundFirstWord(audio, 1.0, 1.5, paddingMs = 100)
+
+        assertEquals(22_400, window.size)
+        assertEquals(audio[28_800], window.first())
+        assertEquals(audio[51_199], window.last())
+
+        val cappedWindow = WakeWordAudioWindow.aroundFirstWord(audio, 0.0, 2.5)
+        assertEquals(38_400, cappedWindow.size)
+    }
+
+    @Test
+    fun shortWakeConfirmationFallsBackToWholeAudioWhenWordTimingIsUnavailable() {
+        val audio = byteArrayOf(1, 2, 3, 4)
+
+        assertTrue(audio.contentEquals(WakeWordAudioWindow.aroundFirstWord(audio, null, null)))
     }
 
     @Test
@@ -31,8 +51,6 @@ class WakeWordDetectionTest {
         assertTrue(WakeWordConfidencePolicy.accepts(0.683))
         assertTrue(WakeWordConfidencePolicy.accepts(0.697))
         assertFalse(WakeWordConfidencePolicy.accepts(0.549))
-        assertTrue(WakeWordConfidencePolicy.allowsWakeOnlyFallback(0.90))
-        assertFalse(WakeWordConfidencePolicy.allowsWakeOnlyFallback(0.899))
     }
 
     @Test
