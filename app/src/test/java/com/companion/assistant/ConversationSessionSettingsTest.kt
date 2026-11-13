@@ -18,4 +18,10 @@ class ConversationSessionSettingsTest {
         assertEquals("Kapalı", ConversationSessionPolicy.label(0))
         assertEquals("20 saniye", ConversationSessionPolicy.label(20))
     }
+
+    @Test
+    fun followUpRetryPreservesPendingTimeoutAndRearmsOnlyWhenMissing() {
+        assertEquals(false, ConversationSessionPolicy.shouldArmTimeoutAfterRetry(timeoutAlreadyPending = true))
+        assertEquals(true, ConversationSessionPolicy.shouldArmTimeoutAfterRetry(timeoutAlreadyPending = false))
+    }
 }

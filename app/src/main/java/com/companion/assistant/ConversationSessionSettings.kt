@@ -11,6 +11,8 @@ internal object ConversationSessionPolicy {
         else -> DEFAULT_TIMEOUT_SECONDS * 1_000L
     }
 
+    fun shouldArmTimeoutAfterRetry(timeoutAlreadyPending: Boolean): Boolean = !timeoutAlreadyPending
+
     fun label(seconds: Int): String = if (seconds == 0) "Kapalı" else "$seconds saniye"
 }
 

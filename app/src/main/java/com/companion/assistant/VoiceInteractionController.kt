@@ -838,7 +838,11 @@ internal class VoiceInteractionController(
             robotCore.dispatch(RobotEvent.FollowUpListeningEnded(sessionId))
         }
         Log.i(TAG, "follow_up_listening_retry session=$sessionId reason=$reason")
-        scheduleConversationSessionTimeout(sessionId)
+        // Keep the deadline established after the last reply. Silent recognition retries must not
+        // extend the open-mic session forever; real speech refreshes it in onSpeechStarted().
+        if (ConversationSessionPolicy.shouldArmTimeoutAfterRetry(conversationSessionTimeout != null)) {
+            scheduleConversationSessionTimeout(sessionId)
+        }
         cancelFollowUpRetry()
         lateinit var retry: Runnable
         retry = Runnable {
