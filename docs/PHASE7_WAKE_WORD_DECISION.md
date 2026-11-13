@@ -1,6 +1,6 @@
 # Phase 7.1 — Local Wake-Word Architecture Decision
 
-Status: this document records the Phase 7.1 investigation. Phase 7.3 now contains an opt-in Vosk prototype; its device detection quality and resource behavior remain unverified. See [Phase 7.3 implementation and acceptance](PHASE7_3_AYSE_WAKE_WORD.md).
+Status: this document records the Phase 7.1 investigation. Phase 7.3 added the opt-in Vosk detector; Phase 7.4 now hands a leading `Ayşe` detection directly to Turkish speech recognition and re-arms after return to sleep. The revised hand-off still needs physical device validation. See [Phase 7.3 implementation and acceptance](PHASE7_3_AYSE_WAKE_WORD.md) and [Phase 7.4 hand-off](PHASE7_4_WAKE_HANDOFF.md).
 
 ## Canonical wake phrase
 
@@ -12,12 +12,12 @@ Settings label: **`Uyandırma sözcüğü: Ayşe`**. The implemented control is 
 
 - `MainActivity` creates the existing face and voice controller. Tapping the face is the current path into microphone permission and push-to-talk.
 - The default Android `SpeechRecognizer` owns its microphone session. The optional PCM path uses `AudioRecorder`/`AudioRecord`. A wake listener must stop and release its capture before either path starts; two simultaneous microphone owners are not acceptable.
-- `RobotCore` owns sleeping/waking state and the sleeping face is mapped from Core. Phase 7.3 adds an `AWAKE` result for wake-word detection.
+- `RobotCore` owns sleeping/waking/voice state and the sleeping face is mapped from Core. Phase 7.4 sends wake detection directly into `LISTENING`.
 - `FaceBehavior` owns visual sleep/wake timers independently. It can wake itself after a short randomized sleep, so the current sleeping face is not a persistent wake-word standby state.
 - `MainActivity` keeps the screen on while active, stops face behavior on pause, and the manifest declares `RECORD_AUDIO`. Phase 7.3 adds an opt-in foreground service and persistent notification.
 - The current platform speech service may use network processing for the post-wake utterance. A local wake-word detector can avoid uploading standby audio, but that does not make the existing post-wake STT offline.
 
-The Phase 7.3 implementation listens only after explicit opt-in, using Vosk locally. Actual Turkish acoustic detection and false-activation behavior have not yet been physically verified; no wake-word support claim is made.
+The implementation listens only after explicit opt-in, using Vosk locally. Actual Turkish acoustic detection, the new STT hand-off, and false-activation behavior have not yet been physically verified; no reliability claim is made.
 
 ## Candidate comparison
 
@@ -41,22 +41,20 @@ A genuinely local, no-service-fee experiment is possible, but it is not a plug-a
 
 This confirms that local custom training can avoid a paid wake-word service; it does not establish a reliable Turkish model today. Training from scratch remains the fallback investigation if the Vosk prototype fails.
 
-## Proposed ownership and hand-off
+## Ownership and hand-off
 
 Keep `RobotCore` as the sole authority for activity state. Add wake detection as a host effect/event at the existing reducer boundary; do not create a second state machine in the service or duplicate face animation logic.
 
 ```text
 SLEEPING (opt-in wake detector owns the microphone)
-  -> WAKING (valid Ayşe event; detector stops and releases capture)
-  -> AWAKE (attentive face; no STT in Phase 7.3)
-  -> LISTENING only after a later explicit face tap
+  -> LISTENING (leading Ayşe partial/final; detector stops and releases capture)
   -> THINKING (existing conversation flow)
   -> SPEAKING (existing TTS owns audio output)
-  -> RETURNING_TO_SLEEP (TTS complete, silence timeout, or recoverable error)
+  -> RETURNING_TO_SLEEP (TTS complete, no-command timeout, or recoverable error)
   -> SLEEPING (start wake detection only if user opted in and permission is granted)
 ```
 
-The face maps Core states to closed eyes, an opening transition, attentive eyes, a thinking cue, speaking animation, and a closing transition. It must not infer that the robot is asleep from an idle timer while STT or TTS is active. The wake service releases the mic before sending the wake event; duplicate wake results are suppressed by the detector and stale Core state ignores events received outside sleep.
+The face maps Core states to closed eyes, attentive listening eyes, a thinking cue, speaking animation, and a closing transition. A face tap while asleep still uses the original opening animation and push-to-talk flow. It must not infer that the robot is asleep from an idle timer while STT or TTS is active. The wake service releases the mic before sending the wake event; duplicate wake results are suppressed by the detector and stale Core state ignores events received outside sleep.
 
 Use one low-cost audio capture loop and process bounded chunks locally. Do not persist standby audio or send it to the Mac, backend, Gemini, or any other network service. Start a foreground service and a persistent, understandable notification only after explicit opt-in and microphone permission. API 25 supports foreground services; notification-channel handling is needed only on API 26+. Screen-off capture, OEM process survival, and any minimal partial wake lock must be measured on the GM 5 Plus; do not assume the service alone guarantees reliable screen-off listening.
 
@@ -66,10 +64,10 @@ Use one low-cost audio capture loop and process bounded chunks locally. Do not p
 | --- | --- | --- |
 | 7.1 | This investigation and decision only. No behavior change. | Document the candidate, state ownership, privacy boundary, and device-test plan. |
 | 7.2 | Sleep/wake face presentation, still using existing touch interaction. **Implemented:** Core state drives the sleeping/waking/returning face and tap-to-listening flow. APK build/install/launch and sleeping/listening/cancel-to-sleep screens were checked on the GM 5 Plus; detailed frame timing and CPU/battery remain unmeasured. |
-| 7.3 | **Implemented prototype:** local Vosk monitor, bundled Turkish model, explicit opt-in, foreground notification, stop control, audio lease, and `AWAKE` state. | Acoustic recognition, false activations, and resource use must still be tested on GM 5 Plus. Unit tests use mocked audio. |
-| 7.4 | Mic ownership hand-off from local detector to existing STT and back. | Repeatedly prove one mic owner at a time, session-scoped events, timeout/error recovery, and no wake detection during TTS. |
+| 7.3 | **Implemented prototype:** local Vosk monitor, bundled Turkish model, explicit opt-in, foreground notification, stop control, audio lease, and leading-prefix detection. | Acoustic recognition, false activations, and resource use must still be tested on GM 5 Plus. Unit tests use mocked audio. |
+| 7.4 | **Implemented; device acceptance pending:** mic ownership hand-off from local detector to existing STT; sleep and consent-gated re-arm after no-speech timeout or TTS. | Repeatedly prove one mic owner at a time, command words are not clipped, timeout recovery works, and wake detection stays off during STT/TTS. |
 | 7.5 | Lifecycle, screen-off, reboot, and endurance. | Measure CPU, peak RAM, latency, false accepts/hour, missed wakes, battery, and temperature on the actual device; document unsupported lifecycle cases honestly. |
 
 Suggested benchmark gate for a prototype (not yet measured): at least 95 detections in 100 intentional `Ayşe` trials across at least three Turkish speakers and quiet/desk-noise conditions, with no more than 0.5 unintended wakes per hour in representative negative audio. Record distance and environment; report the underlying counts, not only percentages. Include similar-sounding ordinary Turkish speech, TV/music, silence, screen-on/off, duplicate results, missing permission, capture failure, STT failure, and TTS completion. If the detector cannot reject common room speech reliably, keep wake-word monitoring disabled and do not change the canonical phrase.
 
-No CPU, RAM, latency, false-activation, battery, temperature, screen-off, or actual `Ayşe` microphone measurements were collected in Phases 7.1 or 7.2. Phase 7.3 automated tests exercise exact Unicode matching and mocked audio, not the acoustic model. This document does not claim verified wake-word support.
+No CPU, RAM, latency, false-activation, battery, temperature, screen-off, or actual `Ayşe` hand-off measurements have been collected for Phase 7.4. Automated tests exercise Unicode/prefix matching and mocked audio, not the acoustic model or Android recognizer. This document does not claim verified wake-word reliability.

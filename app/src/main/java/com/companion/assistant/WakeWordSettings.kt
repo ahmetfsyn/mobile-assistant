@@ -8,8 +8,29 @@ internal enum class WakeWordStatus(val label: String) {
     LOADING_MODEL("Yerel model hazırlanıyor"),
     LISTENING("Yerel olarak dinliyor: Ayşe"),
     PAUSED("Dinleme duraklatıldı"),
-    DETECTED("Ayşe algılandı · mikrofon duraklatıldı"),
+    DETECTED("Ayşe algılandı"),
     ERROR("Dinleme başlatılamadı")
+}
+
+internal object WakeWordServiceStartPolicy {
+    fun shouldStart(
+        enabled: Boolean,
+        microphonePermissionGranted: Boolean,
+        robotSleeping: Boolean,
+        status: WakeWordStatus
+    ): Boolean {
+        if (!enabled || !microphonePermissionGranted || !robotSleeping) return false
+        return when (status) {
+            WakeWordStatus.STARTING,
+            WakeWordStatus.LOADING_MODEL,
+            WakeWordStatus.LISTENING,
+            WakeWordStatus.ERROR -> false
+
+            WakeWordStatus.DISABLED,
+            WakeWordStatus.PAUSED,
+            WakeWordStatus.DETECTED -> true
+        }
+    }
 }
 
 internal class WakeWordSettingsStore(context: Context) {

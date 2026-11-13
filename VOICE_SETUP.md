@@ -23,7 +23,7 @@ Ayarlar > **GÜVENLİK VE GİZLİLİK** bölümünde “Ayşe ile yerel uyandır
 
 Türkçe `Ayşe` sözcüğü Vosk modeliyle cihazda işlenir. Ham ses saklanmaz, backend'e veya Gemini'ye gönderilmez. İlk açılışta model hazırlanması birkaç saniye sürebilir; model yaklaşık 35 MB indirilmiş APK alanı ve yaklaşık 58.8 MB açılmış uygulama verisi kullanır. Uygulama ayarları ayrıca dinleme sırasında belleğin artabileceğini gösterir.
 
-`Ayşe` algılanınca robot gözlerini açıp **UYANDIM · DOKUN VE KONUŞ** durumuna geçer. Bu aşamada konuşma tanıma otomatik başlamaz. Yüze sonradan dokunmak mevcut push-to-talk akışını başlatır. Phase 7.3'te mikrofon dinlemesi konuşma/TTS sonrasında otomatik yeniden başlamaz; ayarlarda seçeneği kapatıp tekrar açarak elle yeniden etkinleştirin.
+`Ayşe` algılanınca robot gözlerini açar ve mevcut Türkçe konuşma tanımayı otomatik başlatır; yüz **DİNLİYORUM** durumuna geçer. Wake-word mikrofonu önce bırakılır, ardından konuşma tanıma kendi mikrofon oturumunu alır. Komut başlamadan önce yüzün dinleme durumuna geçmesini bekleyin; Android 7'nin sistem tanıyıcısı daha önce wake-word motorunun aldığı ses parçasını devralamaz. Konuşma başlamazsa 8 saniye sonra oturum kapanır ve robot uykuya döner; süre içinde konuşma başlarsa bu başlangıç zamanlayıcısı iptal olur. Yanıt bittikten sonra, Ayşe izni ve mikrofon izni hâlâ açıksa yerel uyandırma dinlemesi uykuya dönüşte yeniden başlar. Ayarı kapatmak bunu durdurur.
 
 GM 5 Plus'ta bir gerçek mikrofon wake olayı gözlendi. Bu tek deneme başarı oranını, benzer sözcüklerde yanlış uyanmayı, CPU/batarya etkisini veya uzun süreli kararlılığı doğrulamaz. Ayrıntılar ve açık cihaz testleri [`docs/PHASE7_3_AYSE_WAKE_WORD.md`](docs/PHASE7_3_AYSE_WAKE_WORD.md) içinde tutulur.
 

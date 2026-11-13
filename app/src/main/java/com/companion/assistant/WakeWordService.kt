@@ -349,6 +349,11 @@ internal class VoskWakeWordEngine(modelDirectory: File) : WakeWordEngine {
         return JSONObject(recognizer.result).optString("text").trim().takeIf { it.isNotEmpty() }
     }
 
+    override fun partialTranscript(): String? {
+        if (closed.get()) return null
+        return JSONObject(recognizer.partialResult).optString("partial").trim().takeIf { it.isNotEmpty() }
+    }
+
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
         try { recognizer.close() } finally { model.close() }

@@ -35,6 +35,7 @@ internal class VoiceInteractionController(
     @Volatile private var activeMicrophoneLease: MicrophoneOwnership.Lease? = null
     private var recognitionTask: Future<*>? = null
     private var activeRecording: AudioRecording? = null
+    private var noCommandTimeout: Runnable? = null
     private val emotionReducer = EmotionReducer()
     private var emotionState = EmotionState.CALM
     private val emotionDecayRunnable = Runnable {
@@ -51,6 +52,7 @@ internal class VoiceInteractionController(
         }
         if (closed || !robotCore.isCurrent(sessionId, RobotActivityState.LISTENING)) return
         activeSessionId = sessionId
+        cancelNoCommandTimeout()
         mainHandler.removeCallbacks(emotionDecayRunnable)
         val interactionId = UUID.randomUUID().toString()
         activeInteractionId = interactionId
@@ -65,22 +67,36 @@ internal class VoiceInteractionController(
             return
         }
         activeMicrophoneLease = microphoneLease
+        scheduleNoCommandTimeout(sessionId, interactionId)
 
         try {
             speechInput.startListening(sessionId, language, object : SpeechInput.Callback {
+                override fun onSpeechStarted(sessionId: Long) = dispatchOnMain {
+                    if (activeSessionId != sessionId || activeInteractionId != interactionId) return@dispatchOnMain
+                    cancelNoCommandTimeout()
+                    Log.i(TAG, "command_speech_started interactionId=$interactionId session=$sessionId")
+                }
+
                 override fun onRecordingReady(sessionId: Long, recording: AudioRecording) {
                     releaseMicrophoneLease(microphoneLease)
-                    dispatchOnMain { onRecordingReady(sessionId, language, interactionId, recording) }
+                    dispatchOnMain {
+                        cancelNoCommandTimeout()
+                        onRecordingReady(sessionId, language, interactionId, recording)
+                    }
                 }
 
                 override fun onTranscriptReady(sessionId: Long, transcript: String) {
                     releaseMicrophoneLease(microphoneLease)
-                    dispatchOnMain { onTranscriptReady(sessionId, language, interactionId, transcript) }
+                    dispatchOnMain {
+                        cancelNoCommandTimeout()
+                        onTranscriptReady(sessionId, language, interactionId, transcript)
+                    }
                 }
 
                 override fun onError(sessionId: Long, message: String) {
                     releaseMicrophoneLease(microphoneLease)
                     dispatchOnMain {
+                        cancelNoCommandTimeout()
                         Log.w(TAG, "recognition_failed interactionId=$interactionId session=$sessionId")
                         reportFailure(sessionId, message)
                     }
@@ -99,6 +115,7 @@ internal class VoiceInteractionController(
             return
         }
         if (activeSessionId != sessionId) return
+        cancelNoCommandTimeout()
         Log.i(TAG, "interaction_cancelled interactionId=${activeInteractionId ?: "unknown"} session=$sessionId")
         speechInput.cancel()
         releaseActiveMicrophoneLease()
@@ -165,6 +182,7 @@ internal class VoiceInteractionController(
     fun close() {
         if (closed) return
         closed = true
+        cancelNoCommandTimeout()
         mainHandler.removeCallbacks(emotionDecayRunnable)
         activeSessionId?.let(::cancelSessionOnClose)
         speechInput.close()
@@ -375,6 +393,7 @@ internal class VoiceInteractionController(
     private fun reportFailure(session: Long, message: String) {
         if (closed || robotCore.snapshot.sessionId != session) return
         if (robotCore.snapshot.activity !in VOICE_STATES) return
+        cancelNoCommandTimeout()
         Log.w(TAG, "interaction_failed interactionId=${activeInteractionId ?: "unknown"} session=$session")
         applyEmotionEvent(EmotionEvent.INTERACTION_FAILED, scheduleDecay = true)
         speechInput.cancel()
@@ -391,6 +410,7 @@ internal class VoiceInteractionController(
     }
 
     private fun cancelSessionOnClose(sessionId: Long) {
+        cancelNoCommandTimeout()
         speechInput.cancel()
         releaseActiveMicrophoneLease()
         recognitionTask?.cancel(true)
@@ -418,6 +438,26 @@ internal class VoiceInteractionController(
         activeMicrophoneLease?.let(::releaseMicrophoneLease)
     }
 
+    private fun scheduleNoCommandTimeout(sessionId: Long, interactionId: String) {
+        cancelNoCommandTimeout()
+        lateinit var timeout: Runnable
+        timeout = Runnable {
+            if (noCommandTimeout === timeout) noCommandTimeout = null
+            if (closed || activeSessionId != sessionId || activeInteractionId != interactionId ||
+                !robotCore.isCurrent(sessionId, RobotActivityState.LISTENING)
+            ) return@Runnable
+            Log.i(TAG, "command_start_timeout interactionId=$interactionId session=$sessionId")
+            reportFailure(sessionId, "KONUŞMA ZAMANI AŞILDI")
+        }
+        noCommandTimeout = timeout
+        mainHandler.postDelayed(timeout, NO_COMMAND_TIMEOUT_MS)
+    }
+
+    private fun cancelNoCommandTimeout() {
+        noCommandTimeout?.let(mainHandler::removeCallbacks)
+        noCommandTimeout = null
+    }
+
     private fun applyEmotionEvent(event: EmotionEvent, scheduleDecay: Boolean = false) {
         emotionState = emotionReducer.reduce(emotionState, event, SystemClock.elapsedRealtime())
         onFaceCueChanged(FaceCueMapper.map(emotionState))
@@ -430,6 +470,7 @@ internal class VoiceInteractionController(
     private companion object {
         const val TAG = "VoiceInteraction"
         const val EMOTION_DECAY_REFRESH_MS = 22_000L
+        const val NO_COMMAND_TIMEOUT_MS = 8_000L
         val VOICE_STATES = setOf(
             RobotActivityState.LISTENING,
             RobotActivityState.THINKING,

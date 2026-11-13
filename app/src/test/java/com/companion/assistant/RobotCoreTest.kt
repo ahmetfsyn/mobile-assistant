@@ -264,25 +264,32 @@ class RobotCoreTest {
     }
 
     @Test
-    fun localWakeDetectionOpensAttentiveFaceWithoutStartingSpeechRecognition() {
+    fun localWakeDetectionImmediatelyStartsSpeechRecognition() {
         val core = readyCoreWithMicrophone()
         core.dispatch(RobotEvent.WakeWordMonitoringChanged(true))
 
-        assertTrue(core.dispatch(RobotEvent.WakeWordDetected).isEmpty())
-        assertEquals(RobotActivityState.WAKING, core.snapshot.activity)
-        val wakeSession = core.snapshot.sessionId
-        assertTrue(core.dispatch(RobotEvent.WakeWordDetected).isEmpty())
-        assertEquals(wakeSession, core.snapshot.sessionId)
-
-        assertTrue(core.dispatch(RobotEvent.WakeAnimationCompleted(wakeSession)).isEmpty())
-        assertEquals(RobotActivityState.AWAKE, core.snapshot.activity)
-        assertEquals("UYANDIM · DOKUN VE KONUŞ", RobotFacePresenter.forActivity(core.snapshot.activity).status)
-
-        assertEquals(
-            listOf(RobotEffect.StartListening(wakeSession + 1L)),
-            core.dispatch(RobotEvent.FaceTapped)
-        )
+        val effects = core.dispatch(RobotEvent.WakeWordDetected)
+        assertEquals(listOf(RobotEffect.StartListening(1L)), effects)
         assertEquals(RobotActivityState.LISTENING, core.snapshot.activity)
+        val listeningSession = core.snapshot.sessionId
+        assertTrue(core.dispatch(RobotEvent.WakeWordDetected).isEmpty())
+        assertEquals(listeningSession, core.snapshot.sessionId)
+        assertEquals("DİNLİYORUM", RobotFacePresenter.forActivity(core.snapshot.activity).status)
+    }
+
+    @Test
+    fun noSpeechTimeoutReturnsWakeWordInteractionToSleep() {
+        val core = readyCoreWithMicrophone()
+        core.dispatch(RobotEvent.WakeWordMonitoringChanged(true))
+        core.dispatch(RobotEvent.WakeWordDetected)
+        val listeningSession = core.snapshot.sessionId
+
+        core.dispatch(RobotEvent.SessionFailed(listeningSession, "Ses algılanamadı."))
+        assertEquals(RobotActivityState.ERROR, core.snapshot.activity)
+        core.dispatch(RobotEvent.ErrorDismissed(core.snapshot.sessionId))
+        assertEquals(RobotActivityState.RETURNING_TO_SLEEP, core.snapshot.activity)
+        core.dispatch(RobotEvent.SleepAnimationCompleted(core.snapshot.sessionId))
+        assertEquals(RobotActivityState.SLEEPING, core.snapshot.activity)
     }
 
     @Test

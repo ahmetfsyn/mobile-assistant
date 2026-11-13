@@ -120,7 +120,7 @@ class MainActivity : Activity() {
 
         val face = FaceView(this)
         faceView = face
-        val core = RobotCore { _, current -> onRobotSnapshotChanged(current) }
+        val core = RobotCore { previous, current -> onRobotSnapshotChanged(previous, current) }
         robotCore = core
         val tokenStore = CompanionAccessTokenStore(applicationContext)
         accessTokenStore = tokenStore
@@ -941,15 +941,11 @@ class MainActivity : Activity() {
     private fun ensureWakeWordServiceForOptIn() {
         val settings = wakeWordSettingsStore ?: return
         val core = robotCore ?: return
-        if (!settings.isEnabled() || !hasMicrophonePermission() ||
-            core.snapshot.activity != RobotActivityState.SLEEPING
-        ) return
-        if (settings.status() in setOf(
-                WakeWordStatus.STARTING,
-                WakeWordStatus.LOADING_MODEL,
-                WakeWordStatus.LISTENING,
-                WakeWordStatus.DETECTED,
-                WakeWordStatus.ERROR
+        if (!WakeWordServiceStartPolicy.shouldStart(
+                enabled = settings.isEnabled(),
+                microphonePermissionGranted = hasMicrophonePermission(),
+                robotSleeping = core.snapshot.activity == RobotActivityState.SLEEPING,
+                status = settings.status()
             )
         ) return
         settings.setStatus(WakeWordStatus.STARTING)
@@ -1018,7 +1014,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun onRobotSnapshotChanged(current: RobotSnapshot) {
+    private fun onRobotSnapshotChanged(previous: RobotSnapshot, current: RobotSnapshot) {
         if (current.activity != RobotActivityState.WAKING) {
             mainHandler.removeCallbacks(wakeAnimationFinished)
             pendingWakeAnimationSession = null
@@ -1062,6 +1058,16 @@ class MainActivity : Activity() {
                 RobotActivityState.PROACTIVE_SPEAKING
             )
         ) pauseWakeWordMonitoringForInteraction()
+
+        if (previous.activity != RobotActivityState.SLEEPING &&
+            current.activity == RobotActivityState.SLEEPING && ReminderHost.isVisible
+        ) {
+            mainHandler.post {
+                if (ReminderHost.isVisible && robotCore?.snapshot?.activity == RobotActivityState.SLEEPING) {
+                    ensureWakeWordServiceForOptIn()
+                }
+            }
+        }
 
         if (current.activity == RobotActivityState.WAKING) faceView?.setCaption(null)
         faceView?.setRobotActivityState(current.activity, current.errorMessage)

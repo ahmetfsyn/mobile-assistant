@@ -13,7 +13,7 @@ Status: implemented and installed on the General Mobile GM 5 Plus (Android 7.1.1
 
 ## Wake trigger and boundaries
 
-As delivered in Phase 7.2, the face tap was the visual wake trigger and continued into push-to-talk; Phase 7.2 itself added no wake detector. Phase 7.3 later adds opt-in local `Ayşe` recognition, a foreground service, and an `AWAKE` attentive state without automatically starting speech recognition. See [Phase 7.3](PHASE7_3_AYSE_WAKE_WORD.md).
+As delivered in Phase 7.2, the face tap was the visual wake trigger and continued into push-to-talk; Phase 7.2 itself added no wake detector. Phase 7.3 later added opt-in local `Ayşe` recognition and a foreground service. Phase 7.4 connects detection directly to Turkish speech recognition and re-arms after return to sleep. See [Phase 7.3](PHASE7_3_AYSE_WAKE_WORD.md) and [Phase 7.4](PHASE7_4_WAKE_HANDOFF.md).
 
 ## Verification
 

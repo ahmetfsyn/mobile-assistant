@@ -16,6 +16,7 @@ internal interface SpeechInput : Closeable {
         fun onRecordingReady(sessionId: Long, recording: AudioRecording)
         fun onTranscriptReady(sessionId: Long, transcript: String)
         fun onError(sessionId: Long, message: String)
+        fun onSpeechStarted(sessionId: Long) = Unit
     }
 
     fun startListening(sessionId: Long, language: VoiceLanguage, callback: Callback)
@@ -82,6 +83,10 @@ internal class PcmSpeechInput(
         activeSessionId = sessionId
         val started = try {
             audioRecorder.start(object : AudioRecorder.Callback {
+                override fun onSpeechStarted() {
+                    if (!closed && activeSessionId == sessionId) callback.onSpeechStarted(sessionId)
+                }
+
                 override fun onRecordingComplete(recording: AudioRecording) {
                     if (closed || activeSessionId != sessionId) {
                         recording.close()
@@ -260,6 +265,7 @@ internal class PlatformSpeechInput(
                 override fun onBeginningOfSpeech() = dispatchForAttempt(attempt) {
                     request.speechDetected = true
                     diagnostics.info("Konuşma algılandı: oturum=${request.sessionId}, deneme=$number")
+                    request.callback.onSpeechStarted(request.sessionId)
                 }
 
                 override fun onEndOfSpeech() = dispatchForAttempt(attempt) {

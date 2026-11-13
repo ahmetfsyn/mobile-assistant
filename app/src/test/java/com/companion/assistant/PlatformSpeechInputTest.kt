@@ -35,6 +35,17 @@ class PlatformSpeechInputTest {
     }
 
     @Test
+    fun beginningOfSpeechIsForwardedSoTheCommandTimeoutCanBeCancelled() {
+        val fixture = Fixture()
+        val callback = TestCallback()
+
+        fixture.input.startListening(22L, VoiceLanguage.TURKISH, callback)
+        fixture.factory.engines.single().beginningOfSpeech()
+
+        assertEquals(listOf(22L), callback.speechStartedSessions)
+    }
+
+    @Test
     fun speechTimeoutAndNoMatchRemainDistinctRecognitionFailures() {
         assertError(
             AndroidSpeechRecognizer.ERROR_SPEECH_TIMEOUT,
@@ -220,6 +231,7 @@ class PlatformSpeechInputTest {
     private class TestCallback : SpeechInput.Callback {
         val transcripts = mutableListOf<String>()
         val errors = mutableListOf<String>()
+        val speechStartedSessions = mutableListOf<Long>()
 
         override fun onRecordingReady(sessionId: Long, recording: AudioRecording) = Unit
         override fun onTranscriptReady(sessionId: Long, transcript: String) {
@@ -228,6 +240,10 @@ class PlatformSpeechInputTest {
 
         override fun onError(sessionId: Long, message: String) {
             errors += message
+        }
+
+        override fun onSpeechStarted(sessionId: Long) {
+            speechStartedSessions += sessionId
         }
     }
 

@@ -20,6 +20,10 @@ class WakeWordDetectionTest {
         assertFalse(WakeWordMatcher.isExactAyse("Ayşe merhaba"))
         assertFalse(WakeWordMatcher.isExactAyse(""))
         assertFalse(WakeWordMatcher.isExactAyse(null))
+        assertTrue(WakeWordMatcher.startsWithAyse("Ayşe, hava nasıl?"))
+        assertTrue(WakeWordMatcher.startsWithAyse("AYŞE su içmemi hatırlat"))
+        assertFalse(WakeWordMatcher.startsWithAyse("Ayşelik bir kelime"))
+        assertFalse(WakeWordMatcher.startsWithAyse("Bana Ayşe de"))
     }
 
     @Test
@@ -29,12 +33,16 @@ class WakeWordDetectionTest {
         assertFalse(gate.acceptFinalResult("[partial: Ayşe]"))
         assertTrue(gate.acceptFinalResult("Ayşe"))
         assertFalse(gate.acceptFinalResult("Ayşe"))
+
+        val commandGate = WakeWordDetectionGate()
+        assertTrue(commandGate.acceptAyseCommandStart("Ayşe, hava nasıl?"))
+        assertFalse(commandGate.acceptAyseCommandStart("Ayşe"))
     }
 
     @Test
     fun monitorConsumesFinalResultsLocallyAndReleasesResourcesOnDetection() {
         val source = FakeAudioSource(3)
-        val engine = FakeWakeWordEngine(listOf(null, "Ayşe merhaba", "AYŞE."))
+        val engine = FakeWakeWordEngine(listOf(null, "merhaba Ayşe", "AYŞE."))
         val monitor = WakeWordMonitor(source, engine)
         try {
             assertTrue(monitor.runUntilDetected())
@@ -47,6 +55,37 @@ class WakeWordDetectionTest {
         } finally {
             monitor.close()
         }
+    }
+
+    @Test
+    fun monitorTriggersAsSoonAsPartialTranscriptBeginsWithAyse() {
+        val source = FakeAudioSource(1)
+        val engine = FakeWakeWordEngine(listOf(null), listOf("Ayşe, hava nasıl?"))
+        val monitor = WakeWordMonitor(source, engine)
+        try {
+            assertTrue(monitor.runUntilDetected())
+            assertEquals(1, source.reads)
+            assertEquals(1, source.closes)
+            assertEquals(1, engine.closes)
+            assertNull(MicrophoneOwnership.currentOwner())
+            assertTrue(source.bufferAfterClose!!.all { it == 0.toByte() })
+        } finally {
+            monitor.close()
+        }
+    }
+
+    @Test
+    fun wakeListenerCanRearmAfterDetectionOrPttPauseOnlyWithOptInPermissionAndSleep() {
+        fun canStart(status: WakeWordStatus, enabled: Boolean = true, permission: Boolean = true, sleeping: Boolean = true) =
+            WakeWordServiceStartPolicy.shouldStart(enabled, permission, sleeping, status)
+
+        assertTrue(canStart(WakeWordStatus.DETECTED))
+        assertTrue(canStart(WakeWordStatus.PAUSED))
+        assertFalse(canStart(WakeWordStatus.ERROR))
+        assertFalse(canStart(WakeWordStatus.LISTENING))
+        assertFalse(canStart(WakeWordStatus.DETECTED, enabled = false))
+        assertFalse(canStart(WakeWordStatus.DETECTED, permission = false))
+        assertFalse(canStart(WakeWordStatus.DETECTED, sleeping = false))
     }
 
     @Test
@@ -122,10 +161,15 @@ class WakeWordDetectionTest {
         }
     }
 
-    private class FakeWakeWordEngine(results: List<String?>) : WakeWordEngine {
+    private class FakeWakeWordEngine(
+        results: List<String?>,
+        partialResults: List<String?> = emptyList()
+    ) : WakeWordEngine {
         private val pending = results.toMutableList()
+        private val pendingPartials = partialResults.toMutableList()
         var closes = 0
         override fun acceptAudio(pcm16le: ByteArray, length: Int): String? = if (pending.isEmpty()) null else pending.removeAt(0)
+        override fun partialTranscript(): String? = if (pendingPartials.isEmpty()) null else pendingPartials.removeAt(0)
         override fun close() { closes++ }
     }
 }

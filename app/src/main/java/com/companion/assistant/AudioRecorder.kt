@@ -23,6 +23,7 @@ internal class AudioRecorder {
     interface Callback {
         fun onRecordingComplete(recording: AudioRecording)
         fun onRecordingError(message: String)
+        fun onSpeechStarted() = Unit
     }
 
     private val lock = Any()
@@ -130,6 +131,7 @@ internal class AudioRecorder {
                 val rms = sqrt(squareSum.toDouble() / count).toInt()
                 val chunkTime = SystemClock.elapsedRealtime()
                 if (rms >= SPEECH_THRESHOLD_RMS) {
+                    if (!speechStarted) callback.onSpeechStarted()
                     speechStarted = true
                     silenceStarted = 0L
                 } else if (speechStarted) {

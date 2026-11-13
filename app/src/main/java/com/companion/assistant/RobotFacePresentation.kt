@@ -30,7 +30,6 @@ internal object RobotFacePresenter {
                 "UYKUYA DÖNÜYORUM",
                 RobotFaceTransitionTiming.SLEEP_ANIMATION_MS
             )
-            RobotActivityState.AWAKE -> RobotFacePresentation(FaceExpression.ATTENTIVE, "UYANDIM · DOKUN VE KONUŞ", 360L)
             RobotActivityState.SLEEPING -> RobotFacePresentation(FaceExpression.SLEEPING, "UYUYORUM", 480L)
             RobotActivityState.OBSERVING -> RobotFacePresentation(FaceExpression.ATTENTIVE, "İNCELEMEDE", 360L)
             RobotActivityState.ACTING -> RobotFacePresentation(FaceExpression.ATTENTIVE, "İŞLİYORUM", 360L)
