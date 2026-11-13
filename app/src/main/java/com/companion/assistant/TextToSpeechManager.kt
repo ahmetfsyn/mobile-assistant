@@ -84,7 +84,8 @@ internal class TextToSpeechManager(context: Context) : SpeechOutput {
             callback.onError("SES MOTORU KAPALI")
             return
         }
-        if (text.isBlank()) {
+        val spokenText = SpokenTextNormalizer.normalize(text)
+        if (spokenText.isBlank()) {
             callback.onError("SÖYLENECEK BİR YANIT YOK")
             return
         }
@@ -95,11 +96,11 @@ internal class TextToSpeechManager(context: Context) : SpeechOutput {
                 callback.onError("KONUŞMA MOTORU BAŞLATILAMADI")
                 return
             }
-            Log.i(TAG, "speech_request_queued chars=${text.length} language=${language.tag}")
-            pendingSpeech.enqueue(PendingSpeech(text, language, delivery.bounded(), callback))
+            Log.i(TAG, "speech_request_queued chars=${spokenText.length} language=${language.tag}")
+            pendingSpeech.enqueue(PendingSpeech(spokenText, language, delivery.bounded(), callback))
             return
         }
-        speakReady(text, language, delivery.bounded(), callback)
+        speakReady(spokenText, language, delivery.bounded(), callback)
     }
 
     override fun stop() {

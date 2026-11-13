@@ -27,5 +27,8 @@ export function buildSystemPrompt(language = "tr-TR", configuredPersonality = ""
     ? "Reply in English unless the user explicitly asks for another language."
     : "Kullanıcı açıkça başka bir dil istemedikçe Türkçe yanıt ver.";
   const truthfulnessRule = english ? ENGLISH_TRUTHFULNESS_RULES : TURKISH_TRUTHFULNESS_RULES;
-  return `${personality}\n\n${languageRule}\n${truthfulnessRule}`;
+  const conciseReplyRule = english
+    ? "For ordinary questions, answer directly in one or two short sentences, usually 5–25 spoken words. Skip introductions and repetition. Give more detail when the user explicitly asks for it."
+    : "Sıradan sorulara doğrudan, genellikle 5–25 konuşma sözcüğüyle bir veya iki kısa cümlede yanıt ver. Gereksiz giriş yapma ve isteği tekrarlama. Kullanıcı açıkça ayrıntı isterse daha uzun açıkla.";
+  return `${personality}\n\n${languageRule}\n${truthfulnessRule}\n${conciseReplyRule}`;
 }

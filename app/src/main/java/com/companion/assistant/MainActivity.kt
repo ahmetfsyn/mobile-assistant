@@ -15,6 +15,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.text.InputType
 import android.util.Log
 import android.view.View
@@ -38,6 +39,9 @@ class MainActivity : Activity() {
     private var robotCore: RobotCore? = null
     private var accessTokenStore: CompanionAccessTokenStore? = null
     private var memoryConsentStore: MemoryConsentStore? = null
+    private var weatherCityStore: AndroidPreferredWeatherCityStore? = null
+    private var pendingWeatherLocationPermissionCallback: ((Boolean) -> Unit)? = null
+    private var weatherLocationPermissionPromptPending = false
     private var securityDialog: AlertDialog? = null
     private var memoryDialog: AlertDialog? = null
     private var memoryApiClient: MemoryApiClient? = null
@@ -50,6 +54,7 @@ class MainActivity : Activity() {
     private var reminderManagerDialog: ReminderManagerDialog? = null
     private var wakeWordEnabledCheckBox: CheckBox? = null
     private var wakeWordStatusText: TextView? = null
+    private var alarmAccessStatusText: TextView? = null
     private var wakeWordReceiverRegistered = false
     private var wakeWordPermissionRequestPending = false
     private var pendingWakeWordCommandTranscript: String? = null
@@ -136,6 +141,10 @@ class MainActivity : Activity() {
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         applyImmersiveFullscreen()
+        alarmAccessStatusText?.apply {
+            text = if (ClockAlarmAccessibilityService.current != null) "Alarm erişimi açık" else "Alarm erişimi kapalı"
+            contentDescription = text
+        }
 
         val face = FaceView(this)
         faceView = face
@@ -150,12 +159,14 @@ class MainActivity : Activity() {
         val reminderSettings = ReminderSettingsStore(applicationContext)
         val wakeWordSettings = WakeWordSettingsStore(applicationContext)
         val conversationSessionSettings = ConversationSessionSettingsStore(applicationContext)
+        val weatherCity = AndroidPreferredWeatherCityStore(applicationContext)
         val scheduler = ReminderScheduler(applicationContext, reminders)
         val reminderApi = ReminderApiClient(BuildConfig.COMPANION_BACKEND_URL, tokenStore::accessToken)
         reminderStore = reminders
         reminderSettingsStore = reminderSettings
         wakeWordSettingsStore = wakeWordSettings
         conversationSessionSettingsStore = conversationSessionSettings
+        weatherCityStore = weatherCity
         reminderScheduler = scheduler
         reminderApiClient = reminderApi
         core.dispatch(RobotEvent.PersistentMemoryConsentChanged(consentStore.isEnabled()))
@@ -196,6 +207,13 @@ class MainActivity : Activity() {
             reminderCommandProcessor = reminderCommands,
             nativeAlarmCommandProcessor = NativeAlarmCommandProcessor(applicationContext),
             localClockCommandProcessor = LocalClockCommandProcessor(),
+            weatherCommandProcessor = WeatherCommandProcessor(
+                api = OpenMeteoWeatherApi(),
+                cache = AndroidWeatherForecastCache(applicationContext),
+                preferredCityStore = weatherCity,
+                locationSource = AndroidWeatherLocationSource(applicationContext)
+            ),
+            requestWeatherLocationPermission = ::requestWeatherLocationPermission,
             sessionTimeoutMillisProvider = conversationSessionSettings::timeoutMillis
         )
         face.setOnFaceTapListener { onFaceTapped() }
@@ -254,7 +272,9 @@ class MainActivity : Activity() {
         unregisterReminderNetworkCallback()
         unregisterWakeWordReceiver()
         mainHandler.removeCallbacks(reminderSyncRetry)
-        dispatchRobotEvent(RobotEvent.HostPaused)
+        if (!weatherLocationPermissionPromptPending && !ClockAlarmAccessibilityService.isManaging) {
+            dispatchRobotEvent(RobotEvent.HostPaused)
+        }
         faceView?.stop()
         super.onPause()
     }
@@ -283,10 +303,23 @@ class MainActivity : Activity() {
                     Toast.makeText(this, "Uyandırma için mikrofon izni gerekli.", Toast.LENGTH_LONG).show()
                 }
             }
+            REQUEST_WEATHER_LOCATION -> {
+                weatherLocationPermissionPromptPending = false
+                getSharedPreferences(WEATHER_PERMISSION_PREFERENCES, MODE_PRIVATE).edit()
+                    .putBoolean(KEY_WEATHER_PERMISSION_ASKED, true)
+                    .apply()
+                val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+                val callback = pendingWeatherLocationPermissionCallback
+                pendingWeatherLocationPermissionCallback = null
+                callback?.invoke(granted)
+            }
         }
     }
 
     override fun onDestroy() {
+        pendingWeatherLocationPermissionCallback?.invoke(false)
+        pendingWeatherLocationPermissionCallback = null
+        weatherLocationPermissionPromptPending = false
         securityDialog?.dismiss()
         securityDialog = null
         memoryDialog?.dismiss()
@@ -310,8 +343,10 @@ class MainActivity : Activity() {
         reminderSettingsStore = null
         wakeWordSettingsStore = null
         conversationSessionSettingsStore = null
+        weatherCityStore = null
         wakeWordEnabledCheckBox = null
         wakeWordStatusText = null
+        alarmAccessStatusText = null
         mainHandler.removeCallbacksAndMessages(null)
         robotCore = null
         faceView?.destroy()
@@ -333,6 +368,7 @@ class MainActivity : Activity() {
         if (isFinishing || securityDialog?.isShowing == true) return
         val tokenStore = accessTokenStore ?: return
         val consentStore = memoryConsentStore ?: return
+        val weatherCities = weatherCityStore ?: return
         val tokenIsStored = tokenStore.accessToken().isNotEmpty()
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -360,6 +396,16 @@ class MainActivity : Activity() {
             text = "Uzun süreli hafızayı etkinleştir"
             isChecked = consentStore.isEnabled()
             contentDescription = "Uzun süreli hafızayı etkinleştir"
+        }
+        val weatherCityDetails = TextView(this).apply {
+            text = "Hava için tercih edilen şehir (isteğe bağlı). Boş bırakırsan bir hava sorgusunda konum izni istenir; son konum kullanılır, GPS sürekli izlenmez."
+            setPadding(0, (16f * resources.displayMetrics.density).toInt(), 0, (4f * resources.displayMetrics.density).toInt())
+        }
+        val weatherCityInput = EditText(this).apply {
+            setText(weatherCities.get().orEmpty())
+            hint = "Örnek: Mersin"
+            isSingleLine = true
+            contentDescription = "Tercih edilen hava durumu şehri"
         }
         val sessionTimeoutStore = conversationSessionSettingsStore ?: return
         val sessionTimeoutDetails = TextView(this).apply {
@@ -421,6 +467,25 @@ class MainActivity : Activity() {
         val voiceExplanation = TextView(this).apply {
             text = "Android seslerinde kadın/erkek bilgisi bulunmaz. Erkek benzeri seçenek aynı Türkçe sesi daha düşük perdeden çalar; gerçek erkek sesi olduğu doğrulanmamıştır."
         }
+        val alarmAccessDetails = TextView(this).apply {
+            text = "Google Saat alarmlarını listelemek, açıp kapatmak, silmek veya düzenlemek için Android Erişilebilirlik ayarlarından bu hizmeti ayrıca etkinleştir. Her işlem Saat ekranından okunup doğrulanır."
+            setPadding(0, (16f * resources.displayMetrics.density).toInt(), 0, (4f * resources.displayMetrics.density).toInt())
+        }
+        val alarmAccessStatus = TextView(this).apply {
+            text = if (ClockAlarmAccessibilityService.current != null) "Alarm erişimi açık" else "Alarm erişimi kapalı"
+            contentDescription = text
+        }
+        val alarmAccessButton = Button(this).apply {
+            text = "ALARM ERİŞİMİNİ AYARLA"
+            contentDescription = "Android Erişilebilirlik ayarlarında Ayşe alarm erişimini aç"
+            setOnClickListener {
+                try {
+                    startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                } catch (_: Exception) {
+                    Toast.makeText(this@MainActivity, "Erişilebilirlik ayarları açılamadı.", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
         val voiceTestButton = Button(this).apply {
             text = "SEÇİLEN SESİ DENE"
             setOnClickListener {
@@ -467,6 +532,8 @@ class MainActivity : Activity() {
         content.addView(details)
         content.addView(tokenInput)
         content.addView(memoryConsent)
+        content.addView(weatherCityDetails)
+        content.addView(weatherCityInput)
         content.addView(sessionTimeoutDetails)
         content.addView(sessionTimeoutButton)
         content.addView(memoryDetails)
@@ -477,6 +544,9 @@ class MainActivity : Activity() {
         content.addView(voiceChoiceButton)
         content.addView(voiceExplanation)
         content.addView(voiceTestButton)
+        content.addView(alarmAccessDetails)
+        content.addView(alarmAccessStatus)
+        content.addView(alarmAccessButton)
         content.addView(memoryManager)
         content.addView(autonomyManager)
         content.addView(familyProfiles)
@@ -489,12 +559,14 @@ class MainActivity : Activity() {
             .setNegativeButton("KAPAT", null)
             .create()
         securityDialog = dialog
+        alarmAccessStatusText = alarmAccessStatus
         wakeWordEnabledCheckBox = wakeWordToggle
         wakeWordStatusText = wakeWordStatus
         dialog.setOnDismissListener {
             if (securityDialog === dialog) securityDialog = null
             if (wakeWordEnabledCheckBox === wakeWordToggle) wakeWordEnabledCheckBox = null
             if (wakeWordStatusText === wakeWordStatus) wakeWordStatusText = null
+            if (alarmAccessStatusText === alarmAccessStatus) alarmAccessStatusText = null
         }
         dialog.setOnShowListener {
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
@@ -504,6 +576,7 @@ class MainActivity : Activity() {
                     return@setOnClickListener
                 }
                 consentStore.setEnabled(memoryConsent.isChecked)
+                weatherCities.set(weatherCityInput.text?.toString())
                 robotCore?.dispatch(RobotEvent.PersistentMemoryConsentChanged(memoryConsent.isChecked))
                 if (robotCore?.snapshot?.activity == RobotActivityState.ERROR) {
                     dispatchRobotEvent(RobotEvent.ErrorDismissed(robotCore?.snapshot?.sessionId ?: 0L))
@@ -981,6 +1054,24 @@ class MainActivity : Activity() {
         Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
             checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
 
+    private fun requestWeatherLocationPermission(callback: (Boolean) -> Unit) {
+        val hasLocationPermission = Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+            checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+            checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        if (hasLocationPermission) {
+            callback(true)
+            return
+        }
+        val preferences = getSharedPreferences(WEATHER_PERMISSION_PREFERENCES, MODE_PRIVATE)
+        if (preferences.getBoolean(KEY_WEATHER_PERMISSION_ASKED, false) || pendingWeatherLocationPermissionCallback != null) {
+            callback(false)
+            return
+        }
+        pendingWeatherLocationPermissionCallback = callback
+        weatherLocationPermissionPromptPending = true
+        requestPermissions(arrayOf(Manifest.permission.ACCESS_COARSE_LOCATION), REQUEST_WEATHER_LOCATION)
+    }
+
     private fun onWakeWordSettingToggled(enabled: Boolean) {
         if (enabled && !hasMicrophonePermission()) {
             setWakeWordCheckBoxChecked(false)
@@ -1229,7 +1320,10 @@ class MainActivity : Activity() {
     private companion object {
         const val REQUEST_MICROPHONE = 4101
         const val REQUEST_WAKE_WORD_MICROPHONE = 4102
+        const val REQUEST_WEATHER_LOCATION = 4103
         const val REMINDER_SYNC_RETRY_MS = 30_000L
         const val ERROR_DISPLAY_MS = 1800L
+        const val WEATHER_PERMISSION_PREFERENCES = "weather_location_permission"
+        const val KEY_WEATHER_PERMISSION_ASKED = "asked_once"
     }
 }

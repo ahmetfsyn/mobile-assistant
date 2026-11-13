@@ -25,7 +25,12 @@ internal data class ConversationConfiguration(
     val maxHistoryMessages: Int
 )
 
-internal data class ConversationReply(val text: String)
+internal data class ConversationReply(
+    /** Markdown-capable text retained for on-screen display and conversation context. */
+    val text: String,
+    /** Plain text selected for speech; the TTS manager also normalizes it as a final safeguard. */
+    val spokenText: String = SpokenTextNormalizer.normalize(text)
+)
 
 internal class ConversationFailure(
     message: String,

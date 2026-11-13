@@ -7,6 +7,8 @@ import android.util.Log
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.UUID
 import java.util.Locale
 
@@ -26,6 +28,8 @@ internal class VoiceInteractionController(
     private val reminderCommandProcessor: ReminderCommandProcessor? = null,
     private val nativeAlarmCommandProcessor: NativeAlarmCommandProcessor? = null,
     private val localClockCommandProcessor: LocalClockCommandProcessor? = null,
+    private val weatherCommandProcessor: WeatherCommandProcessor? = null,
+    private val requestWeatherLocationPermission: (((Boolean) -> Unit) -> Unit)? = null,
     private val sessionTimeoutMillisProvider: () -> Long = {
         ConversationSessionPolicy.timeoutMillis(ConversationSessionPolicy.DEFAULT_TIMEOUT_SECONDS)
     }
@@ -439,7 +443,10 @@ internal class VoiceInteractionController(
                     val localReminderReply = if (localAlarmReply == null && localClockReply == null) {
                         reminderCommandProcessor?.process(transcript)
                     } else null
-                    val dispatch = LocalCommandDispatcher.dispatch(localAlarmReply, localClockReply, localReminderReply)
+                    val localWeatherReply = if (localAlarmReply == null && localClockReply == null && localReminderReply == null) {
+                        processWeatherCommand(transcript, session, interactionId)
+                    } else null
+                    val dispatch = LocalCommandDispatcher.dispatch(localAlarmReply, localClockReply, localReminderReply, localWeatherReply)
                     selectedRoute = dispatch.route
                     Log.i(TAG, "local_command_route_selected interactionId=$interactionId route=${dispatch.route.name.lowercase(Locale.US)} " +
                         "status=${dispatch.result.status.name.lowercase(Locale.US)} " +
@@ -495,7 +502,7 @@ internal class VoiceInteractionController(
                         conversationHistory.appendTurn(transcript, generatedReply.text)
                         robotCore.dispatch(RobotEvent.ConversationReady(session, hasReply = true))
                         if (robotCore.isCurrent(session, RobotActivityState.SPEAKING)) {
-                            speakResponse(session, interactionId, generatedReply.text, language, afterSpeech)
+                            speakResponse(session, interactionId, generatedReply.spokenText, language, afterSpeech)
                         }
                     }
                 }
@@ -737,6 +744,50 @@ internal class VoiceInteractionController(
         )
     }
 
+    private fun processWeatherCommand(transcript: String, session: Long, interactionId: String): LocalActionResult? {
+        val processor = weatherCommandProcessor ?: return null
+        return when (val first = processor.process(transcript)) {
+            WeatherCommandResult.NotHandled -> null
+            is WeatherCommandResult.Handled -> LocalActionResult(LocalActionStatus.LOCAL_SUCCESS, first.message)
+            WeatherCommandResult.NeedsLocationPermission -> {
+                val granted = awaitWeatherLocationPermission(session, interactionId)
+                val decision = if (granted) WeatherPermissionDecision.GRANTED else WeatherPermissionDecision.DENIED
+                when (val result = processor.process(transcript, decision)) {
+                    WeatherCommandResult.NotHandled -> null
+                    WeatherCommandResult.NeedsLocationPermission -> LocalActionResult(
+                        LocalActionStatus.NEEDS_CLARIFICATION,
+                        "Hangi şehir için hava durumuna bakayım?"
+                    )
+                    is WeatherCommandResult.Handled -> LocalActionResult(LocalActionStatus.LOCAL_SUCCESS, result.message)
+                }
+            }
+        }
+    }
+
+    private fun awaitWeatherLocationPermission(session: Long, interactionId: String): Boolean {
+        val request = requestWeatherLocationPermission ?: return false
+        val latch = CountDownLatch(1)
+        var granted = false
+        mainHandler.post {
+            if (closed || activeInteractionId != interactionId ||
+                !robotCore.isCurrent(session, RobotActivityState.THINKING)
+            ) {
+                latch.countDown()
+                return@post
+            }
+            request { result ->
+                granted = result
+                latch.countDown()
+            }
+        }
+        return try {
+            latch.await(LOCATION_PERMISSION_TIMEOUT_SECONDS, TimeUnit.SECONDS) && granted
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
+        }
+    }
+
     private fun reportFailure(session: Long, message: String) {
         if (closed || robotCore.snapshot.sessionId != session) return
         if (robotCore.snapshot.activity !in VOICE_STATES) return
@@ -908,6 +959,7 @@ internal class VoiceInteractionController(
 
     private companion object {
         const val TAG = "VoiceInteraction"
+        const val LOCATION_PERMISSION_TIMEOUT_SECONDS = 60L
         const val EMOTION_DECAY_REFRESH_MS = 22_000L
         const val NO_COMMAND_TIMEOUT_MS = 8_000L
         const val FOLLOW_UP_RETRY_MS = 650L

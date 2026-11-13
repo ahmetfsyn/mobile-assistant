@@ -8,7 +8,7 @@ import java.util.TimeZone
 
 internal enum class TurkishClockQuery { TIME, WEEKDAY, DATE }
 
-internal enum class LocalCommandRoute { NATIVE_ALARM, DEVICE_CLOCK, COMPANION_REMINDER, CONVERSATION_BACKEND }
+internal enum class LocalCommandRoute { NATIVE_ALARM, DEVICE_CLOCK, WEATHER, COMPANION_REMINDER, CONVERSATION_BACKEND }
 
 internal data class LocalCommandDispatchResult(
     val route: LocalCommandRoute,
@@ -17,9 +17,15 @@ internal data class LocalCommandDispatchResult(
 
 /** Deterministic local handlers win; only an unmatched message is allowed to require the backend. */
 internal object LocalCommandDispatcher {
-    fun dispatch(alarm: LocalActionResult?, clock: LocalActionResult?, reminder: String?): LocalCommandDispatchResult = when {
+    fun dispatch(
+        alarm: LocalActionResult?,
+        clock: LocalActionResult?,
+        reminder: String?,
+        weather: LocalActionResult? = null
+    ): LocalCommandDispatchResult = when {
         alarm != null -> LocalCommandDispatchResult(LocalCommandRoute.NATIVE_ALARM, alarm)
         clock != null -> LocalCommandDispatchResult(LocalCommandRoute.DEVICE_CLOCK, clock)
+        weather != null -> LocalCommandDispatchResult(LocalCommandRoute.WEATHER, weather)
         reminder != null -> LocalCommandDispatchResult(
             LocalCommandRoute.COMPANION_REMINDER,
             LocalActionResult(LocalActionStatus.LOCAL_SUCCESS, reminder)
@@ -32,8 +38,12 @@ internal object LocalCommandDispatcher {
 }
 
 internal object LocalCommandRouteSelector {
-    fun select(alarm: LocalActionResult?, clock: LocalActionResult?, reminder: String?): LocalCommandRoute =
-        LocalCommandDispatcher.dispatch(alarm, clock, reminder).route
+    fun select(
+        alarm: LocalActionResult?,
+        clock: LocalActionResult?,
+        reminder: String?,
+        weather: LocalActionResult? = null
+    ): LocalCommandRoute = LocalCommandDispatcher.dispatch(alarm, clock, reminder, weather).route
 }
 
 /** Recognizes only deterministic device-clock questions; these never go to the conversation backend. */

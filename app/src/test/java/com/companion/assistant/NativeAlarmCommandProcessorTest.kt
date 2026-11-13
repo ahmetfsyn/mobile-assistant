@@ -65,22 +65,27 @@ class NativeAlarmCommandProcessorTest {
     }
 
     @Test
-    fun disablingAllAlarmsIsNotFakedByOpeningTheClockApp() {
+    fun disablingAllAlarmsUsesTheManagementGatewayInsteadOfOpeningClock() {
         val launcher = FakeLauncher(target = "com.google.android.deskclock/.HandleSetApiCalls")
-        val result = processor(launcher).process("Aktif alarmları kapat.")!!
+        val gateway = FakeManagement(LocalActionResult(LocalActionStatus.LOCAL_SUCCESS, "3 alarm doğrulanarak kapatıldı."))
+        val result = processor(launcher, management = gateway).process("Aktif alarmları kapat.")!!
         assertEquals(NativeAlarmCommand.DisableAll, TurkishAlarmCommandParser.parse("Aktif alarmları kapat."))
-        assertEquals(LocalActionStatus.UNSUPPORTED, result.status)
-        assertTrue(result.message.contains("doğrulayamam"))
+        assertEquals(LocalActionStatus.LOCAL_SUCCESS, result.status)
+        assertTrue(result.message.contains("3 alarm"))
+        assertTrue(gateway.called)
         assertEquals(0, launcher.launchCount)
     }
 
     @Test
-    fun dismissingCurrentAlarmDoesNotTargetTheNextScheduledAlarm() {
+    fun dismissingAlarmUsesDocumentedSearchModeWithoutClaimingVerification() {
         val launcher = FakeLauncher(target = "com.google.android.deskclock/.HandleApiCalls")
         val result = processor(launcher).process("Ayşe, çalan alarmı kapat.")!!
-        assertEquals(LocalActionStatus.UNSUPPORTED, result.status)
-        assertTrue(result.message.contains("sıradaki alarmı"))
-        assertEquals(0, launcher.launchCount)
+        assertEquals(LocalActionStatus.ACTION_DISPATCHED, result.status)
+        assertTrue(result.message.contains("susturma isteğini"))
+        assertEquals(AlarmClock.ACTION_DISMISS_ALARM, launcher.plan?.action)
+        assertEquals(AlarmClock.ALARM_SEARCH_MODE_NEXT, launcher.plan?.alarmSearchMode)
+        assertEquals(null, result.afterSpeech?.invoke())
+        assertEquals(1, launcher.launchCount)
     }
 
     @Test
@@ -112,39 +117,60 @@ class NativeAlarmCommandProcessorTest {
     }
 
     @Test
-    fun unsupportedAlarmManagementNeverClaimsAClockMutation() {
+    fun alarmManagementParserDistinguishesListDisableDeleteAndEdit() {
         val launcher = FakeLauncher(target = "com.google.android.deskclock/.HandleApiCalls")
         val cases = listOf(
-            "Tek alarmı devre dışı bırak." to NativeAlarmCommand.DisableOne,
-            "Alarmı sil." to NativeAlarmCommand.DeleteOne,
-            "Alarmı düzenle." to NativeAlarmCommand.EditOne,
+            "Saat 9 alarmını kapat." to NativeAlarmCommand.DisableOne(AlarmTarget(540, timeIsAmbiguous = true)),
+            "Saat 9 alarmını sil." to NativeAlarmCommand.DeleteOne(AlarmTarget(540, timeIsAmbiguous = true)),
+            "Aktif alarmları sil." to NativeAlarmCommand.DeleteAll(enabledOnly = true),
+            "Bütün alarmları sil." to NativeAlarmCommand.DeleteAll(enabledOnly = false),
+            "Saat 9 alarmını 10'a değiştir." to NativeAlarmCommand.EditOne(AlarmTarget(540, timeIsAmbiguous = true), 10, 0),
+            "Saat 9 alarmını 10'a al." to NativeAlarmCommand.EditOne(AlarmTarget(540, timeIsAmbiguous = true), 10, 0),
+            "Alarmları göster." to NativeAlarmCommand.ListAlarms(enabledOnly = false),
+            "Aktif alarmları listele." to NativeAlarmCommand.ListAlarms(enabledOnly = true),
+            "Bütün alarmları etkinleştir." to NativeAlarmCommand.EnableAll,
             "Aktif alarmları kapat." to NativeAlarmCommand.DisableAll
         )
         cases.forEach { (transcript, expected) ->
             assertEquals(expected, TurkishAlarmCommandParser.parse(transcript))
-            assertEquals(LocalActionStatus.UNSUPPORTED, processor(launcher).process(transcript)?.status)
         }
+        assertTrue(TurkishAlarmCommandParser.parse("Alarmı sil.") is NativeAlarmCommand.Clarify)
+        assertTrue(TurkishAlarmCommandParser.parse("Aktif alarmı sil.") is NativeAlarmCommand.Clarify)
+        assertEquals(
+            NativeAlarmCommand.DisableOne(AlarmTarget(21 * 60)),
+            TurkishAlarmCommandParser.parse("Akşam saat 9 alarmını kapat.")
+        )
+        assertEquals(
+            NativeAlarmCommand.DisableOne(AlarmTarget(21 * 60)),
+            TurkishAlarmCommandParser.parse("Akşam dokuz alarmını kapat.")
+        )
+        assertEquals(
+            NativeAlarmCommand.DisableOne(AlarmTarget(21 * 60)),
+            TurkishAlarmCommandParser.parse("Gece dokuz alarmını kapat.")
+        )
+        val unsupported = processor(launcher).process("Aktif alarmları kapat.")!!
+        assertEquals(LocalActionStatus.UNSUPPORTED, unsupported.status)
+        assertTrue(unsupported.message.contains("Alarm Erişimi"))
         assertEquals(0, launcher.launchCount)
     }
 
     @Test
     fun showAndSnoozeUseOnlyTheirDocumentedClockIntents() {
         val launcher = FakeLauncher(target = "com.google.android.deskclock/.HandleApiCalls")
-        val show = processor(launcher).process("Alarmları göster.")!!
-        assertEquals(LocalActionStatus.ACTION_DISPATCHED, show.status)
-        assertTrue(show.message.contains("görüntüleyebilirsin"))
-        assertEquals(null, show.afterSpeech?.invoke())
-        assertEquals(AlarmClock.ACTION_SHOW_ALARMS, launcher.plan?.action)
+        val show = processor(launcher, management = FakeManagement(LocalActionResult(LocalActionStatus.LOCAL_SUCCESS, "Alarmlar listelendi.")))
+            .process("Alarmları göster.")!!
+        assertEquals(LocalActionStatus.LOCAL_SUCCESS, show.status)
+        assertTrue(show.message.contains("listelendi"))
 
         val snooze = processor(launcher).process("Çalan alarmı ertele.")!!
         assertEquals(LocalActionStatus.ACTION_DISPATCHED, snooze.status)
         assertTrue(snooze.message.contains("doğrulayamıyorum"))
         assertEquals(null, snooze.afterSpeech?.invoke())
         assertEquals(AlarmClock.ACTION_SNOOZE_ALARM, launcher.plan?.action)
-        assertEquals(2, launcher.launchCount)
+        assertEquals(1, launcher.launchCount)
     }
 
-    private fun processor(launcher: FakeLauncher, diagnostics: RecordingDiagnostics = RecordingDiagnostics()) = NativeAlarmCommandProcessor(
+    private fun processor(launcher: FakeLauncher, diagnostics: RecordingDiagnostics = RecordingDiagnostics(), management: AlarmManagementGateway? = null) = NativeAlarmCommandProcessor(
         launcher = launcher,
         nowCalendar = {
             Calendar.getInstance(TimeZone.getTimeZone("Europe/Istanbul"), Locale("tr", "TR")).apply {
@@ -152,7 +178,8 @@ class NativeAlarmCommandProcessorTest {
             set(2026, Calendar.NOVEMBER, 13, 20, 0, 0)
             }
         },
-        diagnostics = diagnostics
+        diagnostics = diagnostics,
+        management = management
     )
 
     private class FakeLauncher(
@@ -180,5 +207,13 @@ class NativeAlarmCommandProcessorTest {
         val warnings = mutableListOf<String>()
         override fun info(message: String) = Unit
         override fun warning(message: String) { warnings += message }
+    }
+
+    private class FakeManagement(private val result: LocalActionResult) : AlarmManagementGateway {
+        var called = false
+        override fun execute(command: NativeAlarmCommand, interactionId: String): LocalActionResult {
+            called = true
+            return result
+        }
     }
 }
