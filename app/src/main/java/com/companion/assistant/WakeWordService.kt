@@ -29,6 +29,7 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /** Explicitly opt-in foreground service. Standby audio is processed locally and never persisted. */
 class WakeWordService : Service() {
@@ -38,6 +39,7 @@ class WakeWordService : Service() {
     @Volatile private var stopRequested = false
     @Volatile private var monitor: WakeWordMonitor? = null
     @Volatile private var monitorTask: Future<*>? = null
+    private val audioStartRetryCount = AtomicInteger(0)
 
     override fun onCreate() {
         super.onCreate()
@@ -91,7 +93,7 @@ class WakeWordService : Service() {
                     engine.close()
                     throw error
                 }
-                val wakeMonitor = WakeWordMonitor(source, engine)
+                val wakeMonitor = WakeWordMonitor(source, engine, onCaptureStarted = { audioStartRetryCount.set(0) })
                 monitor = wakeMonitor
                 if (stopRequested) {
                     wakeMonitor.close()
@@ -110,6 +112,11 @@ class WakeWordService : Service() {
                     publishWakeDetected(generation, SystemClock.elapsedRealtime(), detection.commandTranscript)
                 } else if (!stopRequested) {
                     fail("MONITOR_STOPPED")
+                }
+            } catch (error: WakeWordAudioStartException) {
+                monitor = null
+                if (!stopRequested && settings.isEnabled() && settings.generation() == generation) {
+                    scheduleAudioStartRetry(generation, error.reason)
                 }
             } catch (error: Exception) {
                 monitor = null
@@ -130,6 +137,20 @@ class WakeWordService : Service() {
                 }
             }
         }
+    }
+
+    private fun scheduleAudioStartRetry(generation: Long, reason: String) {
+        val attempt = audioStartRetryCount.incrementAndGet()
+        if (!WakeWordAudioStartRetryPolicy.shouldRetry(attempt)) {
+            audioStartRetryCount.set(0)
+            fail("AUDIO_START_RETRIES_EXHAUSTED")
+            return
+        }
+        Log.w(TAG, "audio_start_retry attempt=$attempt delay_ms=$AUDIO_START_RETRY_DELAY_MS reason=$reason")
+        publishStatus(WakeWordStatus.STARTING)
+        mainHandler.postDelayed({
+            if (!stopRequested && settings.isEnabled() && settings.generation() == generation) startMonitoring()
+        }, AUDIO_START_RETRY_DELAY_MS)
     }
 
     private fun fail(reason: String) {
@@ -259,6 +280,7 @@ class WakeWordService : Service() {
         const val EXTRA_COMMAND_TRANSCRIPT = "wake_command_transcript"
         private const val CHANNEL_ID = "companion_wake_word"
         private const val NOTIFICATION_ID = 731
+        private const val AUDIO_START_RETRY_DELAY_MS = 350L
         private const val TAG = "WakeWordService"
     }
 }
@@ -446,11 +468,15 @@ internal class VoskWakeWordEngine(modelDirectory: File) : WakeWordEngine {
 
         val audio = utteranceAudio.toByteArray()
         utteranceAudio.erase()
+        val confirmationStartedAt = SystemClock.elapsedRealtime()
         val commandDecode = try {
             decodeCommandFromSameUtterance(audio)
         } finally {
             audio.fill(0)
         }
+        val confirmationDurationMs = SystemClock.elapsedRealtime() - confirmationStartedAt
+        val audioDurationMs = audio.size * 1_000L / (WakeWordMonitor.SAMPLE_RATE_HZ * 2L)
+        Log.i(TAG, "wake_confirmation duration_ms=$confirmationDurationMs audio_ms=$audioDurationMs similar_name=${commandDecode.similarName} command_handoff=${!commandDecode.transcript.isNullOrBlank()}")
         if (commandDecode.similarName) {
             Log.i(TAG, "wake_candidate_rejected reason=similar_name confidence=$confidence")
             return null
@@ -499,7 +525,8 @@ internal class VoskWakeWordEngine(modelDirectory: File) : WakeWordEngine {
     private companion object {
         const val TAG = "WakeWordService"
         const val WAKE_GRAMMAR = "[\"ayşe\",\"aylin\",\"ayşegül\",\"ayşe'nin\",\"[unk]\"]"
-        const val ENDPOINTER_INITIAL_SILENCE_SECONDS = 5f
+        // Flush empty silence more often so command confirmation does not decode seconds of idle audio.
+        const val ENDPOINTER_INITIAL_SILENCE_SECONDS = 1.5f
         const val ENDPOINTER_END_SILENCE_SECONDS = 0.4f
         const val ENDPOINTER_MAX_SECONDS = 20f
         const val MAX_UTTERANCE_BYTES = WakeWordMonitor.SAMPLE_RATE_HZ * 2 * 15
@@ -545,8 +572,13 @@ internal class AudioRecordWakeWordSource : WakeWordAudioSource {
 
     override fun start(): Boolean {
         if (closed.get()) return false
-        audioRecord.startRecording()
-        return audioRecord.recordingState == AudioRecord.RECORDSTATE_RECORDING
+        return try {
+            audioRecord.startRecording()
+            audioRecord.recordingState == AudioRecord.RECORDSTATE_RECORDING
+        } catch (_: IllegalStateException) {
+            Log.w("WakeWordService", "audio_record_start_rejected reason=illegal_state")
+            false
+        }
     }
 
     override fun read(buffer: ByteArray): Int {

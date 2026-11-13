@@ -10,6 +10,14 @@ import java.io.IOException
 
 class WakeWordDetectionTest {
     @Test
+    fun audioStartRetryPolicyAllowsFourTransientAttempts() {
+        assertFalse(WakeWordAudioStartRetryPolicy.shouldRetry(0))
+        assertTrue(WakeWordAudioStartRetryPolicy.shouldRetry(1))
+        assertTrue(WakeWordAudioStartRetryPolicy.shouldRetry(4))
+        assertFalse(WakeWordAudioStartRetryPolicy.shouldRetry(5))
+    }
+
+    @Test
     fun wakeConfidenceAcceptsMeasuredAyseCandidatesAndRejectsLowerScores() {
         assertTrue(WakeWordConfidencePolicy.accepts(0.573))
         assertTrue(WakeWordConfidencePolicy.accepts(0.683))
@@ -117,7 +125,8 @@ class WakeWordDetectionTest {
         val monitor = WakeWordMonitor(failedStart, engine)
         try {
             val error = runCatching { monitor.runUntilDetected() }.exceptionOrNull()
-            assertTrue(error is IllegalStateException)
+            assertTrue(error is WakeWordAudioStartException)
+            assertEquals("AUDIO_RECORD_START_FAILED", (error as WakeWordAudioStartException).reason)
             assertEquals(1, failedStart.closes)
             assertEquals(1, engine.closes)
             assertNull(MicrophoneOwnership.currentOwner())

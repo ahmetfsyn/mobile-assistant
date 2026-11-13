@@ -72,11 +72,20 @@ internal interface WakeWordEngine : Closeable {
     fun acceptAudio(pcm16le: ByteArray, length: Int): String?
 }
 
+internal class WakeWordAudioStartException(val reason: String) : IllegalStateException(reason)
+
+internal object WakeWordAudioStartRetryPolicy {
+    const val MAX_RETRIES = 4
+
+    fun shouldRetry(attempt: Int): Boolean = attempt in 1..MAX_RETRIES
+}
+
 /** Blocking worker-thread loop. Audio, model, and exclusive microphone lease are always released. */
 internal class WakeWordMonitor(
     private val source: WakeWordAudioSource,
     private val engine: WakeWordEngine,
-    private val audioBuffer: ByteArray = ByteArray(DEFAULT_BUFFER_BYTES)
+    private val audioBuffer: ByteArray = ByteArray(DEFAULT_BUFFER_BYTES),
+    private val onCaptureStarted: () -> Unit = {}
 ) : Closeable {
     private val stopped = AtomicBoolean(false)
     private val resourcesClosed = AtomicBoolean(false)
@@ -87,9 +96,10 @@ internal class WakeWordMonitor(
     fun runUntilDetected(): WakeWordRecognition? {
         try {
             lease = MicrophoneOwnership.acquire(MicrophoneOwnership.Owner.WAKE_WORD)
-                ?: throw IllegalStateException("Mikrofon başka bir işlem tarafından kullanılıyor")
+                ?: throw WakeWordAudioStartException("MICROPHONE_BUSY")
             if (stopped.get()) return null
-            if (!source.start()) throw IllegalStateException("Mikrofon kaydı başlatılamadı")
+            if (!source.start()) throw WakeWordAudioStartException("AUDIO_RECORD_START_FAILED")
+            onCaptureStarted()
             while (!stopped.get()) {
                 val count = source.read(audioBuffer)
                 if (stopped.get()) return null
