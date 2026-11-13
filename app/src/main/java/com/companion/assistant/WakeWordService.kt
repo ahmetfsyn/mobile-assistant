@@ -104,7 +104,7 @@ class WakeWordService : Service() {
                     settings.setWakeEventPending(generation)
                     settings.setStatus(WakeWordStatus.DETECTED)
                     Log.i(TAG, "wake_detected listening_elapsed_ms=$listeningElapsed")
-                    publishWakeDetected(generation)
+                    publishWakeDetected(generation, SystemClock.elapsedRealtime())
                 } else if (!stopRequested) {
                     fail("MONITOR_STOPPED")
                 }
@@ -172,11 +172,12 @@ class WakeWordService : Service() {
         }
     }
 
-    private fun publishWakeDetected(generation: Long) {
+    private fun publishWakeDetected(generation: Long, detectedAtMs: Long) {
         mainHandler.post {
             val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             manager.cancel(NOTIFICATION_ID)
-            sendBroadcast(Intent(ACTION_WAKE_DETECTED).setPackage(packageName).putExtra(EXTRA_GENERATION, generation))
+            sendBroadcast(Intent(ACTION_WAKE_DETECTED).setPackage(packageName)
+                .putExtra(EXTRA_GENERATION, generation).putExtra(EXTRA_DETECTED_AT_MS, detectedAtMs))
             stopForeground(true)
             stopSelf()
         }
@@ -245,6 +246,7 @@ class WakeWordService : Service() {
         const val ACTION_WAKE_DETECTED = "com.companion.assistant.action.WAKE_WORD_DETECTED"
         const val EXTRA_STATUS = "status"
         const val EXTRA_GENERATION = "monitoring_generation"
+        const val EXTRA_DETECTED_AT_MS = "detected_at_elapsed_ms"
         private const val CHANNEL_ID = "companion_wake_word"
         private const val NOTIFICATION_ID = 731
         private const val TAG = "WakeWordService"
@@ -326,7 +328,7 @@ internal class WakeWordModelInstaller(private val context: Context) {
     }
 }
 
-/** Vosk general ASR constrained to Ayşe; final text must still pass exact matching. */
+/** Contrastive local grammar with a completed-result confidence gate. */
 internal class VoskWakeWordEngine(modelDirectory: File) : WakeWordEngine {
     private val model: Model
     private val recognizer: Recognizer
@@ -336,7 +338,9 @@ internal class VoskWakeWordEngine(modelDirectory: File) : WakeWordEngine {
         val loadedModel = Model(modelDirectory.absolutePath)
         model = loadedModel
         recognizer = try {
-            Recognizer(loadedModel, WakeWordMonitor.SAMPLE_RATE_HZ.toFloat(), GRAMMAR)
+            Recognizer(loadedModel, WakeWordMonitor.SAMPLE_RATE_HZ.toFloat(), GRAMMAR).apply {
+                setWords(true)
+            }
         } catch (error: Throwable) {
             loadedModel.close()
             throw error
@@ -346,12 +350,11 @@ internal class VoskWakeWordEngine(modelDirectory: File) : WakeWordEngine {
     override fun acceptAudio(pcm16le: ByteArray, length: Int): String? {
         if (closed.get() || length <= 0 || length > pcm16le.size) return null
         if (!recognizer.acceptWaveForm(pcm16le, length)) return null
-        return JSONObject(recognizer.result).optString("text").trim().takeIf { it.isNotEmpty() }
-    }
-
-    override fun partialTranscript(): String? {
-        if (closed.get()) return null
-        return JSONObject(recognizer.partialResult).optString("partial").trim().takeIf { it.isNotEmpty() }
+        val result = JSONObject(recognizer.result)
+        val text = result.optString("text").trim()
+        val confidence = result.optJSONArray("result")?.optJSONObject(0)?.optDouble("conf", 0.0) ?: 0.0
+        if (!WakeWordMatcher.isExactAyse(text) || confidence < MIN_CONFIDENCE) return null
+        return text
     }
 
     override fun close() {
@@ -360,7 +363,8 @@ internal class VoskWakeWordEngine(modelDirectory: File) : WakeWordEngine {
     }
 
     private companion object {
-        const val GRAMMAR = "[\"ayşe\",\"[unk]\"]"
+        const val GRAMMAR = "[\"ayşe\",\"aylin\",\"ayşegül\",\"ayşe'nin\",\"[unk]\"]"
+        const val MIN_CONFIDENCE = 0.75
     }
 }
 

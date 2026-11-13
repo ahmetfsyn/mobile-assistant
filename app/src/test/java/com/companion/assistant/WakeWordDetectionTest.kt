@@ -20,10 +20,8 @@ class WakeWordDetectionTest {
         assertFalse(WakeWordMatcher.isExactAyse("Ayşe merhaba"))
         assertFalse(WakeWordMatcher.isExactAyse(""))
         assertFalse(WakeWordMatcher.isExactAyse(null))
-        assertTrue(WakeWordMatcher.startsWithAyse("Ayşe, hava nasıl?"))
-        assertTrue(WakeWordMatcher.startsWithAyse("AYŞE su içmemi hatırlat"))
-        assertFalse(WakeWordMatcher.startsWithAyse("Ayşelik bir kelime"))
-        assertFalse(WakeWordMatcher.startsWithAyse("Bana Ayşe de"))
+        listOf("Aylin", "Ayşegül", "Ayşe'nin", "Ayşelik", "Bana Ayşe de", "Ayşe, hava nasıl?")
+            .forEach { assertFalse(WakeWordMatcher.isExactAyse(it)) }
     }
 
     @Test
@@ -34,9 +32,6 @@ class WakeWordDetectionTest {
         assertTrue(gate.acceptFinalResult("Ayşe"))
         assertFalse(gate.acceptFinalResult("Ayşe"))
 
-        val commandGate = WakeWordDetectionGate()
-        assertTrue(commandGate.acceptAyseCommandStart("Ayşe, hava nasıl?"))
-        assertFalse(commandGate.acceptAyseCommandStart("Ayşe"))
     }
 
     @Test
@@ -58,13 +53,13 @@ class WakeWordDetectionTest {
     }
 
     @Test
-    fun monitorTriggersAsSoonAsPartialTranscriptBeginsWithAyse() {
-        val source = FakeAudioSource(1)
-        val engine = FakeWakeWordEngine(listOf(null), listOf("Ayşe, hava nasıl?"))
+    fun monitorRejectsSimilarNamesAndNonStandaloneResults() {
+        val source = FakeAudioSource(5)
+        val engine = FakeWakeWordEngine(listOf("Aylin", "Ayşegül", "Ayşe'nin", "Ayşe merhaba", "Ayşe"))
         val monitor = WakeWordMonitor(source, engine)
         try {
             assertTrue(monitor.runUntilDetected())
-            assertEquals(1, source.reads)
+            assertEquals(5, source.reads)
             assertEquals(1, source.closes)
             assertEquals(1, engine.closes)
             assertNull(MicrophoneOwnership.currentOwner())
@@ -162,14 +157,11 @@ class WakeWordDetectionTest {
     }
 
     private class FakeWakeWordEngine(
-        results: List<String?>,
-        partialResults: List<String?> = emptyList()
+        results: List<String?>
     ) : WakeWordEngine {
         private val pending = results.toMutableList()
-        private val pendingPartials = partialResults.toMutableList()
         var closes = 0
         override fun acceptAudio(pcm16le: ByteArray, length: Int): String? = if (pending.isEmpty()) null else pending.removeAt(0)
-        override fun partialTranscript(): String? = if (pendingPartials.isEmpty()) null else pendingPartials.removeAt(0)
         override fun close() { closes++ }
     }
 }

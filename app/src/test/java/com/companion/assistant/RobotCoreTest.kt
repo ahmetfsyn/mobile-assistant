@@ -79,10 +79,45 @@ class RobotCoreTest {
         core.dispatch(RobotEvent.SleepRequested)
         assertEquals(RobotActivityState.SPEAKING, core.snapshot.activity)
         core.dispatch(RobotEvent.SpeechCompleted(started.sessionId))
+        assertEquals(RobotActivityState.AWAKE_GRACE, core.snapshot.activity)
+        val graceSession = core.snapshot.sessionId
+        core.dispatch(RobotEvent.AwakeGraceElapsed(graceSession))
         assertEquals(RobotActivityState.RETURNING_TO_SLEEP, core.snapshot.activity)
 
         core.dispatch(RobotEvent.SleepAnimationCompleted(core.snapshot.sessionId))
         assertEquals(RobotActivityState.SLEEPING, core.snapshot.activity)
+    }
+
+    @Test
+    fun newInteractionCancelsTheAwakeGraceTransition() {
+        val core = readyCoreWithMicrophone()
+        val first = startListening(core)
+        core.dispatch(RobotEvent.TranscriptReady(first.sessionId, true))
+        core.dispatch(RobotEvent.ConversationReady(first.sessionId, true))
+        core.dispatch(RobotEvent.SpeechCompleted(first.sessionId))
+        val grace = core.snapshot.sessionId
+        assertEquals(RobotActivityState.AWAKE_GRACE, core.snapshot.activity)
+
+        val next = core.dispatch(RobotEvent.FaceTapped).single() as RobotEffect.StartListening
+        assertEquals(RobotActivityState.LISTENING, core.snapshot.activity)
+        core.dispatch(RobotEvent.AwakeGraceElapsed(grace))
+        assertEquals(RobotActivityState.LISTENING, core.snapshot.activity)
+        assertEquals(next.sessionId, core.snapshot.sessionId)
+    }
+
+    @Test
+    fun ayseDuringGraceStartsListeningAndLateGraceTimerDoesNothing() {
+        val core = readyCoreWithMicrophone()
+        core.dispatch(RobotEvent.WakeWordMonitoringChanged(true))
+        val first = startListening(core)
+        core.dispatch(RobotEvent.TranscriptReady(first.sessionId, true))
+        core.dispatch(RobotEvent.ConversationReady(first.sessionId, true))
+        core.dispatch(RobotEvent.SpeechCompleted(first.sessionId))
+        val grace = core.snapshot.sessionId
+
+        assertEquals(listOf(RobotEffect.StartListening(grace + 1)), core.dispatch(RobotEvent.WakeWordDetected))
+        core.dispatch(RobotEvent.AwakeGraceElapsed(grace))
+        assertEquals(RobotActivityState.LISTENING, core.snapshot.activity)
     }
 
     @Test

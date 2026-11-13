@@ -17,6 +17,7 @@ internal interface SpeechInput : Closeable {
         fun onTranscriptReady(sessionId: Long, transcript: String)
         fun onError(sessionId: Long, message: String)
         fun onSpeechStarted(sessionId: Long) = Unit
+        fun onSpeechEnded(sessionId: Long) = Unit
     }
 
     fun startListening(sessionId: Long, language: VoiceLanguage, callback: Callback)
@@ -92,6 +93,7 @@ internal class PcmSpeechInput(
                         recording.close()
                         return
                     }
+                    callback.onSpeechEnded(sessionId)
                     callback.onRecordingReady(sessionId, recording)
                 }
 
@@ -270,6 +272,7 @@ internal class PlatformSpeechInput(
 
                 override fun onEndOfSpeech() = dispatchForAttempt(attempt) {
                     diagnostics.info("Konuşma sonu algılandı: oturum=${request.sessionId}, deneme=$number")
+                    request.callback.onSpeechEnded(request.sessionId)
                 }
 
                 override fun onResults(transcript: String) = dispatchForAttempt(attempt) {

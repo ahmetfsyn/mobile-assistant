@@ -9,6 +9,7 @@ internal enum class RobotActivityState {
     THINKING,
     SPEAKING,
     PROACTIVE_SPEAKING,
+    AWAKE_GRACE,
     RETURNING_TO_SLEEP,
     SLEEPING,
     OBSERVING,
@@ -23,6 +24,7 @@ internal fun RobotActivityState.canStartProactiveSpeech(): Boolean =
 internal object RobotFaceTransitionTiming {
     const val WAKE_ANIMATION_MS = 720L
     const val SLEEP_ANIMATION_MS = 980L
+    const val AWAKE_GRACE_MS = 5_000L
 }
 
 /** Platform grants and user choices are explicit inputs; new capabilities default to disabled. */
@@ -62,6 +64,7 @@ internal sealed interface RobotEvent {
     data class TranscriptReady(val sessionId: Long, val hasText: Boolean) : RobotEvent
     data class ConversationReady(val sessionId: Long, val hasReply: Boolean) : RobotEvent
     data class SpeechCompleted(val sessionId: Long) : RobotEvent
+    data class AwakeGraceElapsed(val sessionId: Long) : RobotEvent
     data class WakeAnimationCompleted(val sessionId: Long) : RobotEvent
     data class SleepAnimationCompleted(val sessionId: Long) : RobotEvent
     data object ProactiveReminderStarted : RobotEvent
@@ -203,7 +206,7 @@ internal class RobotCore(
         }
 
         RobotEvent.WakeWordDetected -> {
-            if (hostResumed && snapshot.activity == RobotActivityState.SLEEPING &&
+            if (hostResumed && snapshot.activity in setOf(RobotActivityState.SLEEPING, RobotActivityState.AWAKE_GRACE) &&
                 snapshot.consent.wakeWordMonitoringEnabled && snapshot.consent.microphonePermissionGranted
             ) startListening() else emptyList()
         }
@@ -243,8 +246,14 @@ internal class RobotCore(
 
         is RobotEvent.SpeechCompleted -> {
             if (isCurrent(event.sessionId, RobotActivityState.SPEAKING)) {
-                beginReturningToSleep()
+                snapshot = snapshot.copy(activity = RobotActivityState.AWAKE_GRACE,
+                    sessionId = snapshot.sessionId + 1L, errorMessage = null)
             }
+            emptyList()
+        }
+
+        is RobotEvent.AwakeGraceElapsed -> {
+            if (isCurrent(event.sessionId, RobotActivityState.AWAKE_GRACE)) beginReturningToSleep()
             emptyList()
         }
 
@@ -312,7 +321,7 @@ internal class RobotCore(
         }
 
         RobotEvent.SleepRequested -> {
-            if (snapshot.activity == RobotActivityState.IDLE) {
+            if (snapshot.activity == RobotActivityState.IDLE || snapshot.activity == RobotActivityState.AWAKE_GRACE) {
                 beginReturningToSleep()
             }
             emptyList()
@@ -338,7 +347,7 @@ internal class RobotCore(
         RobotEvent.HostPaused -> {
             hostResumed = false
             if (snapshot.activity in VOICE_STATES) cancelToSleepingImmediately()
-            else if (snapshot.activity == RobotActivityState.WAKING ||
+            else if (snapshot.activity == RobotActivityState.AWAKE_GRACE || snapshot.activity == RobotActivityState.WAKING ||
                 snapshot.activity == RobotActivityState.RETURNING_TO_SLEEP
             ) {
                 enterSleepingImmediately()
@@ -368,6 +377,7 @@ internal class RobotCore(
             return emptyList()
         }
         if (activity == RobotActivityState.LISTENING) return cancelToSleep()
+        if (activity == RobotActivityState.AWAKE_GRACE) return startListening()
         if (activity == RobotActivityState.WAKING) return emptyList()
         return beginWaking()
     }

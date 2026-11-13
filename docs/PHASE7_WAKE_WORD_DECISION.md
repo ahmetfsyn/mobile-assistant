@@ -1,6 +1,6 @@
 # Phase 7.1 — Local Wake-Word Architecture Decision
 
-Status: this document records the Phase 7.1 investigation. Phase 7.3 added the opt-in Vosk detector; Phase 7.4 now hands a leading `Ayşe` detection directly to Turkish speech recognition and re-arms after return to sleep. The revised hand-off still needs physical device validation. See [Phase 7.3 implementation and acceptance](PHASE7_3_AYSE_WAKE_WORD.md) and [Phase 7.4 hand-off](PHASE7_4_WAKE_HANDOFF.md).
+Status: this document records the Phase 7.1 investigation. Phase 7.3 added the opt-in Vosk detector; Phase 7.4 now hands a standalone `Ayşe` detection directly to Turkish speech recognition and re-arms after return to sleep. The revised hand-off still needs physical device validation. See [Phase 7.3 implementation and acceptance](PHASE7_3_AYSE_WAKE_WORD.md) and [Phase 7.4 hand-off](PHASE7_4_WAKE_HANDOFF.md).
 
 ## Canonical wake phrase
 
@@ -47,10 +47,11 @@ Keep `RobotCore` as the sole authority for activity state. Add wake detection as
 
 ```text
 SLEEPING (opt-in wake detector owns the microphone)
-  -> LISTENING (leading Ayşe partial/final; detector stops and releases capture)
+  -> LISTENING (completed standalone Ayşe; detector stops and releases capture)
   -> THINKING (existing conversation flow)
   -> SPEAKING (existing TTS owns audio output)
-  -> RETURNING_TO_SLEEP (TTS complete, no-command timeout, or recoverable error)
+  -> AWAKE_GRACE (TTS complete; five seconds attentive)
+  -> RETURNING_TO_SLEEP (grace elapsed, no-command timeout, or recoverable error)
   -> SLEEPING (start wake detection only if user opted in and permission is granted)
 ```
 
@@ -64,10 +65,10 @@ Use one low-cost audio capture loop and process bounded chunks locally. Do not p
 | --- | --- | --- |
 | 7.1 | This investigation and decision only. No behavior change. | Document the candidate, state ownership, privacy boundary, and device-test plan. |
 | 7.2 | Sleep/wake face presentation, still using existing touch interaction. **Implemented:** Core state drives the sleeping/waking/returning face and tap-to-listening flow. APK build/install/launch and sleeping/listening/cancel-to-sleep screens were checked on the GM 5 Plus; detailed frame timing and CPU/battery remain unmeasured. |
-| 7.3 | **Implemented prototype:** local Vosk monitor, bundled Turkish model, explicit opt-in, foreground notification, stop control, audio lease, and leading-prefix detection. | Acoustic recognition, false activations, and resource use must still be tested on GM 5 Plus. Unit tests use mocked audio. |
+| 7.3 | **Implemented prototype:** local Vosk monitor, bundled Turkish model, explicit opt-in, foreground notification, stop control, audio lease, and standalone final-result detection. | Acoustic recognition, false activations, and resource use must still be tested on GM 5 Plus. Unit tests use mocked audio. |
 | 7.4 | **Implemented; device acceptance pending:** mic ownership hand-off from local detector to existing STT; sleep and consent-gated re-arm after no-speech timeout or TTS. | Repeatedly prove one mic owner at a time, command words are not clipped, timeout recovery works, and wake detection stays off during STT/TTS. |
 | 7.5 | Lifecycle, screen-off, reboot, and endurance. | Measure CPU, peak RAM, latency, false accepts/hour, missed wakes, battery, and temperature on the actual device; document unsupported lifecycle cases honestly. |
 
 Suggested benchmark gate for a prototype (not yet measured): at least 95 detections in 100 intentional `Ayşe` trials across at least three Turkish speakers and quiet/desk-noise conditions, with no more than 0.5 unintended wakes per hour in representative negative audio. Record distance and environment; report the underlying counts, not only percentages. Include similar-sounding ordinary Turkish speech, TV/music, silence, screen-on/off, duplicate results, missing permission, capture failure, STT failure, and TTS completion. If the detector cannot reject common room speech reliably, keep wake-word monitoring disabled and do not change the canonical phrase.
 
-No CPU, RAM, latency, false-activation, battery, temperature, screen-off, or actual `Ayşe` hand-off measurements have been collected for Phase 7.4. Automated tests exercise Unicode/prefix matching and mocked audio, not the acoustic model or Android recognizer. This document does not claim verified wake-word reliability.
+No full corpus, false-activation rate, battery, temperature, screen-off, or revised `Ayşe` hand-off measurements have been collected for Phase 7.4. Automated tests exercise exact final-text matching and mocked audio, not the acoustic model or Android recognizer. This document does not claim verified wake-word reliability.

@@ -4,7 +4,7 @@ Status: implemented as an explicit opt-in prototype. Automated tests and the deb
 
 ## Phrase and engine
 
-- The wake phrase is **`Ayşe`**. The Vosk constrained grammar uses the model's lowercase vocabulary spelling `ayşe`; text is normalized to Unicode NFC and lowercased with Turkish locale. The detector can trigger on a partial or final transcript only when `Ayşe` is the first complete token. Transliteration, aliases, and occurrences later in a sentence are rejected.
+- The wake phrase is **`Ayşe`**. Phase 7.4 now requires a completed standalone result with a word-confidence gate; partial results no longer trigger. Text is normalized to Unicode NFC and lowercased with Turkish locale. Transliteration, aliases, inflected or longer names, and occurrences later in a sentence are rejected by the text gate. Acoustic rejection remains unverified.
 - Engine: Vosk Android `0.3.75`, with the official `vosk-model-small-tr-0.3` Turkish model. The bundled compressed model is about 35 MB; its expanded files are about 58.8 MB. It is Apache-2.0 licensed. The exact archive SHA-256 is `8c8d07cec1bce31add14967c16891c84152cdf76d391e33c08278119b9ea96e5`.
 - Inspection confirmed `HCLr.fst` (runtime graph support) is present. A vocabulary check found lowercase `ayşe` in the model grammar; uppercase grammar spelling was warned as out-of-vocabulary. This is evidence for grammar construction only, **not acoustic recognition reliability**.
 - Vosk is constrained general speech recognition, not a dedicated keyword spotter. The `[unk]` grammar alternative and exact final-result matcher provide rejection opportunities, but do not establish a false-activation rate.
@@ -21,7 +21,7 @@ Status: implemented as an explicit opt-in prototype. Automated tests and the deb
 
 ## Verification
 
-Automated JVM tests cover Turkish matching and normalization, leading-prefix detection, rejection of transliteration and non-leading occurrences, one-shot detection, mocked audio processing, capture cleanup, mic exclusivity, automatic Core listening after wake, timeout-to-sleep, and re-arm consent gates. They do not exercise the model's acoustic decoder or Android's installed recognizer.
+Automated JVM tests cover Turkish matching and normalization, standalone final-result detection, rejection of transliteration and non-leading occurrences, one-shot detection, mocked audio processing, capture cleanup, mic exclusivity, automatic Core listening after wake, timeout-to-sleep, and re-arm consent gates. They do not exercise the model's acoustic decoder or Android's installed recognizer.
 
 Physical observation on GM 5 Plus from Phase 7.3: with local monitoring enabled, one repeated exact `Ayşe` utterance produced a wake event without touching the screen; the initial check did not trigger. That observation predates the Phase 7.4 automatic STT hand-off. The new hand-off and automatic re-arm code has not yet been checked with speech on the phone.
 

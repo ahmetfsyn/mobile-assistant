@@ -33,6 +33,7 @@ internal object TtsAudioUsage {
 
 /** Native offline-capable Android TTS implementation. */
 internal class TextToSpeechManager(context: Context) : SpeechOutput {
+    private val voiceSelection = VoiceSelectionStore(context)
     private data class PendingSpeech(
         val text: String,
         val language: VoiceLanguage,
@@ -183,6 +184,10 @@ internal class TextToSpeechManager(context: Context) : SpeechOutput {
             }
         })
         ready = true
+        val turkishVoices = tts.voices.orEmpty().filter { it.locale.language == "tr" }
+        Log.i(TAG, "turkish_voice_inventory count=${turkishVoices.size} entries=${turkishVoices.joinToString { voice ->
+            "${voice.name}:${voice.locale.toLanguageTag()}:network=${voice.isNetworkConnectionRequired}"
+        }}")
         Log.i(TAG, "engine_ready sdk=${Build.VERSION.SDK_INT} usage=$usage")
         val queued = pending
         pending = null
@@ -213,7 +218,8 @@ internal class TextToSpeechManager(context: Context) : SpeechOutput {
         stop()
         val boundedDelivery = delivery.bounded()
         tts.setSpeechRate(boundedDelivery.speechRate)
-        tts.setPitch(boundedDelivery.pitch)
+        val voiceChoice = voiceSelection.selected()
+        tts.setPitch((boundedDelivery.pitch * voiceChoice.pitchMultiplier).coerceIn(0.5f, 2.0f))
         val utteranceId = "companion-${utteranceSequence.incrementAndGet()}"
         currentCallback = callback
         currentUtteranceId = utteranceId

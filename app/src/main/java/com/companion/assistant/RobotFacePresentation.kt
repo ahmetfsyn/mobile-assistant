@@ -20,6 +20,7 @@ internal object RobotFacePresenter {
             RobotActivityState.LISTENING -> RobotFacePresentation(FaceExpression.ATTENTIVE, "DİNLİYORUM", 320L)
             RobotActivityState.THINKING -> RobotFacePresentation(FaceExpression.CURIOUS, "DÜŞÜNÜYORUM", 380L)
             RobotActivityState.SPEAKING -> RobotFacePresentation(FaceExpression.HAPPY, "KONUŞUYORUM", 380L)
+            RobotActivityState.AWAKE_GRACE -> RobotFacePresentation(FaceExpression.ATTENTIVE, "BURADAYIM", 420L)
             RobotActivityState.PROACTIVE_SPEAKING -> RobotFacePresentation(
                 FaceExpression.HAPPY,
                 "HATIRLATMA SÖYLÜYORUM",

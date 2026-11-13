@@ -5,17 +5,13 @@ import java.text.Normalizer
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** Normalizes Turkish wake text and matches the exact phrase or a leading Ayşe command prefix. */
+/** Only a completed standalone Turkish Ayşe result can wake the robot. */
 internal object WakeWordMatcher {
     private val turkish = Locale("tr", "TR")
-    private val leadingAyse = Regex("^ayşe(?:$|[\\s,.;:!?])")
 
     fun isExactAyse(transcript: String?): Boolean {
         return normalize(transcript) == "ayşe"
     }
-
-    fun startsWithAyse(transcript: String?): Boolean =
-        !transcript.isNullOrBlank() && leadingAyse.containsMatchIn(normalize(transcript))
 
     private fun normalize(transcript: String?): String = transcript.orEmpty().let {
         Normalizer.normalize(it.trim(), Normalizer.Form.NFC)
@@ -35,12 +31,6 @@ internal class WakeWordDetectionGate {
         return true
     }
 
-    @Synchronized
-    fun acceptAyseCommandStart(transcript: String?): Boolean {
-        if (emitted || !WakeWordMatcher.startsWithAyse(transcript)) return false
-        emitted = true
-        return true
-    }
 }
 
 internal interface WakeWordAudioSource : Closeable {
@@ -55,8 +45,6 @@ internal interface WakeWordAudioSource : Closeable {
 internal interface WakeWordEngine : Closeable {
     /** Returns the latest completed local result when available. */
     fun acceptAudio(pcm16le: ByteArray, length: Int): String?
-    /** Current local partial text, if the engine exposes one. */
-    fun partialTranscript(): String? = null
 }
 
 /** Blocking worker-thread loop. Audio, model, and exclusive microphone lease are always released. */
@@ -85,11 +73,8 @@ internal class WakeWordMonitor(
                 if (count == 0) continue
                 val alignedCount = count and -2 // PCM16 needs complete samples; defer an incomplete last byte.
                 if (alignedCount == 0) continue
-                val finalTranscript = engine.acceptAudio(audioBuffer, alignedCount)
-                if (gate.acceptFinalResult(finalTranscript) ||
-                    gate.acceptAyseCommandStart(finalTranscript) ||
-                    gate.acceptAyseCommandStart(engine.partialTranscript())
-                ) return true
+                // Partial hypotheses are unstable and can temporarily turn similar names into Ayşe.
+                if (gate.acceptFinalResult(engine.acceptAudio(audioBuffer, alignedCount))) return true
             }
             return false
         } finally {

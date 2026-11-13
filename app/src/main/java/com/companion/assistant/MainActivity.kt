@@ -33,6 +33,7 @@ class MainActivity : Activity() {
 
     private var faceView: FaceView? = null
     private var voiceController: VoiceInteractionController? = null
+    private var textToSpeechManager: TextToSpeechManager? = null
     private var microphonePermissionRequestPending = false
     private var robotCore: RobotCore? = null
     private var accessTokenStore: CompanionAccessTokenStore? = null
@@ -83,11 +84,13 @@ class MainActivity : Activity() {
                 }
                 WakeWordService.ACTION_WAKE_DETECTED -> {
                     val generation = intent.getLongExtra(WakeWordService.EXTRA_GENERATION, -1L)
+                    val detectedAtMs = intent.getLongExtra(WakeWordService.EXTRA_DETECTED_AT_MS, -1L)
                     val settings = wakeWordSettingsStore ?: return
                     if (!settings.isEnabled() || settings.generation() != generation) return
                     wakeWordSettingsStore?.setStatus(WakeWordStatus.DETECTED)
                     wakeWordSettingsStore?.consumeWakeEventPending()
                     refreshWakeWordControls()
+                    if (detectedAtMs > 0L) Log.i("VoiceTiming", "wake_to_dispatch_ms=${android.os.SystemClock.elapsedRealtime() - detectedAtMs}")
                     dispatchRobotEvent(RobotEvent.WakeWordDetected)
                 }
             }
@@ -110,6 +113,12 @@ class MainActivity : Activity() {
         val session = pendingSleepAnimationSession ?: return@Runnable
         pendingSleepAnimationSession = null
         dispatchRobotEvent(RobotEvent.SleepAnimationCompleted(session))
+    }
+    private var awakeGraceSession: Long? = null
+    private val awakeGraceFinished = Runnable {
+        val session = awakeGraceSession ?: return@Runnable
+        awakeGraceSession = null
+        dispatchRobotEvent(RobotEvent.AwakeGraceElapsed(session))
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -156,11 +165,13 @@ class MainActivity : Activity() {
             syncDelete = ::syncReminderDeletion
         )
         val speechInput = SpeechInputFactory.create(applicationContext)
+        val speechOutput = TextToSpeechManager(applicationContext)
+        textToSpeechManager = speechOutput
         voiceController = VoiceInteractionController(
             robotCore = core,
             speechInput = speechInput.input,
             recordedSpeechRecognizer = speechInput.recordedSpeechRecognizer,
-            speechOutput = TextToSpeechManager(applicationContext),
+            speechOutput = speechOutput,
             conversationEngine = ConversationEngineFactory.create(
                 endpoint = BuildConfig.COMPANION_BACKEND_URL,
                 accessTokenProvider = tokenStore::accessToken,
@@ -170,7 +181,8 @@ class MainActivity : Activity() {
             onCaptionChanged = face::setCaption,
             onFaceCueChanged = face::setEmotionCue,
             onAuthenticationRequired = { showSecuritySettings(authenticationRequired = true) },
-            reminderCommandProcessor = reminderCommands
+            reminderCommandProcessor = reminderCommands,
+            nativeAlarmCommandProcessor = NativeAlarmCommandProcessor(applicationContext)
         )
         face.setOnFaceTapListener { onFaceTapped() }
         face.setOnSleepRequestListener { dispatchRobotEvent(RobotEvent.SleepRequested) }
@@ -272,6 +284,7 @@ class MainActivity : Activity() {
         dispatchRobotEvent(RobotEvent.CloseRequested)
         voiceController?.close()
         voiceController = null
+        textToSpeechManager = null
         memoryApiClient?.cancelRequests()
         memoryExecutor.shutdownNow()
         reminderSyncExecutor.shutdownNow()
@@ -352,6 +365,40 @@ class MainActivity : Activity() {
             contentDescription = "Ayşe uyandırma sözcüğü dinlemesini hemen durdur"
             setOnClickListener { disableWakeWordMonitoring() }
         }
+        val voiceStore = VoiceSelectionStore(applicationContext)
+        val voiceChoiceButton = Button(this).apply {
+            text = "SES: ${voiceStore.selected().label}"
+            setOnClickListener {
+                val choices = VoiceChoice.values()
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("KONUŞMA SESİ")
+                    .setSingleChoiceItems(choices.map { it.label }.toTypedArray(), voiceStore.selected().ordinal) { dialog, index ->
+                        voiceStore.select(choices[index])
+                        text = "SES: ${choices[index].label}"
+                        dialog.dismiss()
+                    }
+                    .setNegativeButton("KAPAT", null)
+                    .show()
+            }
+        }
+        val voiceExplanation = TextView(this).apply {
+            text = "Android seslerinde kadın/erkek bilgisi bulunmaz. Erkek benzeri seçenek aynı Türkçe sesi daha düşük perdeden çalar; gerçek erkek sesi olduğu doğrulanmamıştır."
+        }
+        val voiceTestButton = Button(this).apply {
+            text = "SEÇİLEN SESİ DENE"
+            setOnClickListener {
+                pauseWakeWordMonitoringForInteraction()
+                textToSpeechManager?.speak("Merhaba, ben Ayşe. Seçtiğin sesle konuşuyorum.", VoiceLanguage.TURKISH,
+                    object : SpeechOutput.Callback {
+                        override fun onStarted() = Unit
+                        override fun onCompleted() { ensureWakeWordServiceForOptIn() }
+                        override fun onError(message: String) {
+                            Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show()
+                            ensureWakeWordServiceForOptIn()
+                        }
+                    })
+            }
+        }
         val memoryDetails = TextView(this).apply {
             text = "Açıldığında seçilen anılar yerel backend'de saklanır ve yanıt için yapılandırılmış AI sağlayıcısına gönderilebilir. Kapatmak yeni kayıt ve AI kullanımını durdurur; mevcut kayıtları silmez. Son sekiz sohbet mesajı Android'de tutulur."
             setPadding(0, (4f * resources.displayMetrics.density).toInt(), 0, 0)
@@ -372,6 +419,14 @@ class MainActivity : Activity() {
                 showReminderManagement()
             }
         }
+        val familyProfiles = Button(this).apply {
+            text = "AİLE PROFİLLERİ"
+            contentDescription = "Aile profillerini ekle, düzenle veya sil"
+            setOnClickListener {
+                securityDialog?.dismiss()
+                FamilyProfileDialogs.show(this@MainActivity)
+            }
+        }
         content.addView(details)
         content.addView(tokenInput)
         content.addView(memoryConsent)
@@ -380,8 +435,12 @@ class MainActivity : Activity() {
         content.addView(wakeWordToggle)
         content.addView(wakeWordStatus)
         content.addView(stopWakeWord)
+        content.addView(voiceChoiceButton)
+        content.addView(voiceExplanation)
+        content.addView(voiceTestButton)
         content.addView(memoryManager)
         content.addView(autonomyManager)
+        content.addView(familyProfiles)
 
         val dialog = AlertDialog.Builder(this)
             .setTitle("GÜVENLİK VE GİZLİLİK")
@@ -905,7 +964,7 @@ class MainActivity : Activity() {
         settings.setEnabled(true)
         dispatchRobotEvent(RobotEvent.WakeWordMonitoringChanged(true))
         val core = robotCore
-        if (core?.snapshot?.activity == RobotActivityState.SLEEPING) {
+        if (core?.snapshot?.activity in setOf(RobotActivityState.SLEEPING, RobotActivityState.AWAKE_GRACE)) {
             settings.setStatus(WakeWordStatus.STARTING)
             WakeWordServiceControl.start(this)
         } else {
@@ -944,7 +1003,7 @@ class MainActivity : Activity() {
         if (!WakeWordServiceStartPolicy.shouldStart(
                 enabled = settings.isEnabled(),
                 microphonePermissionGranted = hasMicrophonePermission(),
-                robotSleeping = core.snapshot.activity == RobotActivityState.SLEEPING,
+                robotSleeping = core.snapshot.activity in setOf(RobotActivityState.SLEEPING, RobotActivityState.AWAKE_GRACE),
                 status = settings.status()
             )
         ) return
@@ -1015,6 +1074,10 @@ class MainActivity : Activity() {
     }
 
     private fun onRobotSnapshotChanged(previous: RobotSnapshot, current: RobotSnapshot) {
+        if (current.activity != RobotActivityState.AWAKE_GRACE) {
+            awakeGraceSession = null
+            mainHandler.removeCallbacks(awakeGraceFinished)
+        }
         if (current.activity != RobotActivityState.WAKING) {
             mainHandler.removeCallbacks(wakeAnimationFinished)
             pendingWakeAnimationSession = null
@@ -1048,6 +1111,13 @@ class MainActivity : Activity() {
                 mainHandler.postDelayed(sleepAnimationFinished, RobotFaceTransitionTiming.SLEEP_ANIMATION_MS)
             }
 
+            RobotActivityState.AWAKE_GRACE -> {
+                if (previous.activity != RobotActivityState.AWAKE_GRACE) {
+                    awakeGraceSession = current.sessionId
+                    mainHandler.postDelayed(awakeGraceFinished, RobotFaceTransitionTiming.AWAKE_GRACE_MS)
+                }
+            }
+
             else -> Unit
         }
 
@@ -1059,11 +1129,12 @@ class MainActivity : Activity() {
             )
         ) pauseWakeWordMonitoringForInteraction()
 
-        if (previous.activity != RobotActivityState.SLEEPING &&
-            current.activity == RobotActivityState.SLEEPING && ReminderHost.isVisible
+        if (previous.activity != current.activity &&
+            current.activity in setOf(RobotActivityState.SLEEPING, RobotActivityState.AWAKE_GRACE) && ReminderHost.isVisible
         ) {
             mainHandler.post {
-                if (ReminderHost.isVisible && robotCore?.snapshot?.activity == RobotActivityState.SLEEPING) {
+                if (ReminderHost.isVisible && robotCore?.snapshot?.activity in
+                    setOf(RobotActivityState.SLEEPING, RobotActivityState.AWAKE_GRACE)) {
                     ensureWakeWordServiceForOptIn()
                 }
             }
