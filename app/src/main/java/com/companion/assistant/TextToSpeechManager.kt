@@ -48,9 +48,8 @@ internal class TextToSpeechManager(context: Context) : SpeechOutput {
     private var ready = false
     private var initializationFinished = false
     private var closed = false
-    private var pending: PendingSpeech? = null
-    private var currentCallback: SpeechOutput.Callback? = null
-    private var currentUtteranceId: String? = null
+    private val pendingSpeech = PendingSpeechQueue<PendingSpeech>()
+    private val utteranceCallbacks = SpeechUtteranceCallbacks()
     private var audioFocusHeld = false
 
     private val audioFocusListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
@@ -92,10 +91,12 @@ internal class TextToSpeechManager(context: Context) : SpeechOutput {
 
         if (!ready) {
             if (initializationFinished) {
+                Log.w(TAG, "speech_request_rejected reason=initialization_failed language=${language.tag}")
                 callback.onError("KONUŞMA MOTORU BAŞLATILAMADI")
                 return
             }
-            pending = PendingSpeech(text, language, delivery.bounded(), callback)
+            Log.i(TAG, "speech_request_queued chars=${text.length} language=${language.tag}")
+            pendingSpeech.enqueue(PendingSpeech(text, language, delivery.bounded(), callback))
             return
         }
         speakReady(text, language, delivery.bounded(), callback)
@@ -106,9 +107,9 @@ internal class TextToSpeechManager(context: Context) : SpeechOutput {
             mainHandler.post { stop() }
             return
         }
-        pending = null
-        currentCallback = null
-        currentUtteranceId = null
+        utteranceCallbacks.currentId?.let { Log.i(TAG, "speech_request_cancelled utteranceId=$it reason=stop") }
+        pendingSpeech.clear()
+        utteranceCallbacks.cancel()
         engine?.stop()
         abandonAudioFocus()
     }
@@ -120,9 +121,9 @@ internal class TextToSpeechManager(context: Context) : SpeechOutput {
         }
         if (closed) return
         closed = true
-        pending = null
-        currentCallback = null
-        currentUtteranceId = null
+        utteranceCallbacks.currentId?.let { Log.i(TAG, "speech_request_cancelled utteranceId=$it reason=close") }
+        pendingSpeech.clear()
+        utteranceCallbacks.cancel()
         engine?.stop()
         abandonAudioFocus()
         engine?.shutdown()
@@ -139,8 +140,8 @@ internal class TextToSpeechManager(context: Context) : SpeechOutput {
         initializationFinished = true
         if (status != TextToSpeech.SUCCESS) {
             ready = false
-            pending?.callback?.onError("KONUŞMA MOTORU BAŞLATILAMADI")
-            pending = null
+            Log.w(TAG, "engine_initialization_failed status=$status")
+            pendingSpeech.fail { it.callback.onError("KONUŞMA MOTORU BAŞLATILAMADI") }
             return
         }
 
@@ -159,13 +160,16 @@ internal class TextToSpeechManager(context: Context) : SpeechOutput {
         }
         tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String) {
-                dispatch(utteranceId) { it.onStarted() }
+                dispatch(utteranceId) {
+                    Log.i(TAG, "speech_started utteranceId=$utteranceId")
+                    it.onStarted()
+                }
             }
 
             override fun onDone(utteranceId: String) {
                 dispatch(utteranceId) {
-                    currentCallback = null
-                    currentUtteranceId = null
+                    Log.i(TAG, "speech_completed utteranceId=$utteranceId")
+                    utteranceCallbacks.finish(utteranceId)
                     abandonAudioFocus()
                     it.onCompleted()
                 }
@@ -189,8 +193,7 @@ internal class TextToSpeechManager(context: Context) : SpeechOutput {
             "${voice.name}:${voice.locale.toLanguageTag()}:network=${voice.isNetworkConnectionRequired}"
         }}")
         Log.i(TAG, "engine_ready sdk=${Build.VERSION.SDK_INT} usage=$usage")
-        val queued = pending
-        pending = null
+        val queued = pendingSpeech.take()
         if (queued != null) speakReady(queued.text, queued.language, queued.delivery, queued.callback)
     }
 
@@ -211,6 +214,7 @@ internal class TextToSpeechManager(context: Context) : SpeechOutput {
             } else {
                 "İNGİLİZCE SES VERİSİ YÜKLÜ DEĞİL"
             }
+            Log.w(TAG, "speech_request_rejected reason=language_unavailable language=${language.tag} status=$languageStatus")
             callback.onError(message)
             return
         }
@@ -221,35 +225,34 @@ internal class TextToSpeechManager(context: Context) : SpeechOutput {
         val voiceChoice = voiceSelection.selected()
         tts.setPitch((boundedDelivery.pitch * voiceChoice.pitchMultiplier).coerceIn(0.5f, 2.0f))
         val utteranceId = "companion-${utteranceSequence.incrementAndGet()}"
-        currentCallback = callback
-        currentUtteranceId = utteranceId
+        utteranceCallbacks.begin(utteranceId, callback)
+        Log.i(TAG, "speech_request_started utteranceId=$utteranceId chars=${text.length} language=${language.tag} voice=${voiceChoice.label}")
         if (!requestAudioFocus()) {
-            currentCallback = null
-            currentUtteranceId = null
+            utteranceCallbacks.finish(utteranceId)
+            Log.w(TAG, "speech_request_rejected utteranceId=$utteranceId reason=audio_focus_denied")
             callback.onError("SES ODAĞI ALINAMADI")
             return
         }
         val result = tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+        Log.i(TAG, "speech_engine_accepted utteranceId=$utteranceId accepted=${result != TextToSpeech.ERROR}")
         if (result == TextToSpeech.ERROR) dispatchError(utteranceId)
     }
 
     private fun dispatch(utteranceId: String, action: (SpeechOutput.Callback) -> Unit) {
         mainHandler.post {
-            if (closed || currentUtteranceId != utteranceId) return@post
-            val callback = currentCallback ?: return@post
+            if (closed) return@post
+            val callback = utteranceCallbacks.callbackFor(utteranceId) ?: return@post
             action(callback)
         }
     }
 
     private fun dispatchError(utteranceId: String) {
         mainHandler.post {
-            if (closed || currentUtteranceId != utteranceId) return@post
-            val callback = currentCallback
-            currentCallback = null
-            currentUtteranceId = null
+            if (closed) return@post
+            val callback = utteranceCallbacks.finish(utteranceId) ?: return@post
             abandonAudioFocus()
-            callback?.onError("KONUŞMA TAMAMLANAMADI")
-            Log.w(TAG, "utterance_failed id=$utteranceId")
+            callback.onError("KONUŞMA TAMAMLANAMADI")
+            Log.w(TAG, "speech_failed utteranceId=$utteranceId")
         }
     }
 
@@ -280,9 +283,7 @@ internal class TextToSpeechManager(context: Context) : SpeechOutput {
     }
 
     private fun interruptForAudioFocusLoss() {
-        val callback = currentCallback ?: return
-        currentCallback = null
-        currentUtteranceId = null
+        val callback = utteranceCallbacks.cancel() ?: return
         engine?.stop()
         abandonAudioFocus()
         callback.onError("SES ODAĞI KESİLDİ")

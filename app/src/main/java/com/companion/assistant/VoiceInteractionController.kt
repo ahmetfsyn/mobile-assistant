@@ -8,6 +8,7 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import java.util.UUID
+import java.util.Locale
 
 /** Coordinates push-to-talk input, recognition and a response without blocking the UI thread. */
 internal class VoiceInteractionController(
@@ -23,7 +24,8 @@ internal class VoiceInteractionController(
     private val onFaceCueChanged: (FaceCue) -> Unit = {},
     private val onAuthenticationRequired: () -> Unit = {},
     private val reminderCommandProcessor: ReminderCommandProcessor? = null,
-    private val nativeAlarmCommandProcessor: NativeAlarmCommandProcessor? = null
+    private val nativeAlarmCommandProcessor: NativeAlarmCommandProcessor? = null,
+    private val localClockCommandProcessor: LocalClockCommandProcessor? = null
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val recognitionExecutor: ExecutorService = Executors.newSingleThreadExecutor { task ->
@@ -123,6 +125,30 @@ internal class VoiceInteractionController(
             Log.w(TAG, "Ses tanıma başlatılamadı: tür=${error.javaClass.simpleName}")
             reportFailure(sessionId, "KONUŞMA TANIMA SERVİSİ BAŞLATILAMADI")
         }
+    }
+
+    /** Processes the utterance captured by the local wake-word listener without reopening the mic. */
+    fun startWithWakeTranscript(sessionId: Long, transcript: String) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { startWithWakeTranscript(sessionId, transcript) }
+            return
+        }
+        if (closed || transcript.isBlank() || !robotCore.isCurrent(sessionId, RobotActivityState.LISTENING)) return
+        activeSessionId = sessionId
+        recognitionStartedAtMs = SystemClock.elapsedRealtime()
+        speechEndedAtMs = recognitionStartedAtMs
+        requestStartedAtMs = 0L
+        replyReadyAtMs = 0L
+        cancelNoCommandTimeout()
+        mainHandler.removeCallbacks(emotionDecayRunnable)
+        val interactionId = UUID.randomUUID().toString()
+        activeInteractionId = interactionId
+        applyEmotionEvent(EmotionEvent.INTERACTION_STARTED)
+        onCaptionChanged(null)
+        val language = languageProvider()
+        Log.i(TAG, "recognition_session_started interactionId=$interactionId session=$sessionId language=${language.tag} source=local_wake_handoff")
+        Log.i(TAG, "wake_transcript_received interactionId=$interactionId chars=${transcript.length} preview=${VoiceDiagnostics.redactedPreview(transcript)}")
+        onTranscriptReady(sessionId, language, interactionId, transcript)
     }
 
     fun cancelSession(sessionId: Long) {
@@ -304,7 +330,7 @@ internal class VoiceInteractionController(
         try {
             recognitionTask = recognitionExecutor.submit {
                 var reply: ConversationReply? = null
-                var afterSpeech: (() -> Unit)? = null
+                var afterSpeech: (() -> String?)? = null
                 var failure: String? = null
                 var authenticationRequired = false
                 try {
@@ -315,18 +341,28 @@ internal class VoiceInteractionController(
                     requestStartedAtMs = SystemClock.elapsedRealtime()
                     Log.i(
                         TAG,
-                        "conversation_engine_call interactionId=$interactionId session=$session " +
+                        "local_command_routing_started interactionId=$interactionId session=$session " +
                             "messageFingerprint=${VoiceDiagnostics.fingerprint(interactionId, transcript)} " +
                             "historyCount=${priorMessages.size}"
                     )
-                    val localAlarmReply = nativeAlarmCommandProcessor?.process(transcript)
+                    val localAlarmReply = nativeAlarmCommandProcessor?.process(transcript, interactionId)
+                    val localClockReply = if (localAlarmReply == null) {
+                        localClockCommandProcessor?.process(transcript, interactionId)
+                    } else null
                     afterSpeech = localAlarmReply?.afterSpeech
-                    val localReminderReply = if (localAlarmReply == null) reminderCommandProcessor?.process(transcript) else null
+                    val localReminderReply = if (localAlarmReply == null && localClockReply == null) {
+                        reminderCommandProcessor?.process(transcript)
+                    } else null
+                    val route = LocalCommandRouteSelector.select(localAlarmReply, localClockReply, localReminderReply)
+                    Log.i(TAG, "local_command_route_selected interactionId=$interactionId route=${route.name.lowercase(Locale.US)} " +
+                        "handler_reached=${route != LocalCommandRoute.CONVERSATION_BACKEND}")
                     val generatedReply = when {
                         localAlarmReply != null -> ConversationReply(localAlarmReply.message)
+                        localClockReply != null -> ConversationReply(localClockReply.message)
                         localReminderReply != null -> ConversationReply(localReminderReply)
                         else -> conversationEngine.respond(transcript, language, priorMessages, interactionId)
                     }
+                    if (route == LocalCommandRoute.CONVERSATION_BACKEND) Log.i(TAG, "conversation_backend_call interactionId=$interactionId")
                     if (generatedReply.text.isNotBlank()) reply = generatedReply
                     else failure = "BULUT ASİSTANI BOŞ YANIT VERDİ"
                 } catch (error: Exception) {
@@ -382,11 +418,12 @@ internal class VoiceInteractionController(
     }
 
     private fun speakResponse(session: Long, interactionId: String, response: String, language: VoiceLanguage,
-                              afterSpeech: (() -> Unit)? = null) {
+                              afterSpeech: (() -> String?)? = null) {
         if (closed || activeInteractionId != interactionId ||
             !robotCore.isCurrent(session, RobotActivityState.SPEAKING)
         ) return
 
+        Log.i(TAG, "tts_playback_requested interactionId=$interactionId session=$session chars=${response.length}")
         speechOutput.speak(
             response,
             language,
@@ -412,7 +449,9 @@ internal class VoiceInteractionController(
                 applyEmotionEvent(EmotionEvent.INTERACTION_FINISHED, scheduleDecay = true)
                 Log.i(TAG, "tts_playback_completed interactionId=$interactionId session=$session")
                 robotCore.dispatch(RobotEvent.SpeechCompleted(session))
-                afterSpeech?.invoke()
+                afterSpeech?.invoke()?.takeIf(String::isNotBlank)?.let { failure ->
+                    speakPostActionFailure(interactionId, session, failure, language)
+                }
             }
 
             override fun onError(message: String) = dispatchOnMain {
@@ -420,6 +459,20 @@ internal class VoiceInteractionController(
                 reportFailure(session, message)
             }
         })
+    }
+
+    private fun speakPostActionFailure(interactionId: String, session: Long, message: String, language: VoiceLanguage) {
+        Log.i(TAG, "tts_post_action_failure_requested interactionId=$interactionId session=$session chars=${message.length}")
+        speechOutput.speak(
+            message,
+            language,
+            personalityProfile.voiceDeliveryFor(emotionState),
+            object : SpeechOutput.Callback {
+                override fun onStarted() { Log.i(TAG, "tts_post_action_failure_started interactionId=$interactionId session=$session") }
+                override fun onCompleted() { Log.i(TAG, "tts_post_action_failure_completed interactionId=$interactionId session=$session") }
+                override fun onError(message: String) { Log.w(TAG, "tts_post_action_failure_unavailable interactionId=$interactionId session=$session") }
+            }
+        )
     }
 
     private fun reportFailure(session: Long, message: String) {

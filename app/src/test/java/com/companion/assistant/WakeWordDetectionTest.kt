@@ -2,6 +2,7 @@ package com.companion.assistant
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -9,11 +10,13 @@ import java.io.IOException
 
 class WakeWordDetectionTest {
     @Test
-    fun matcherAcceptsExactTurkishPhraseAndUnicodeNormalizationOnly() {
+    fun matcherRequiresAyseAsFirstStandaloneWordAndKeepsCommandRemainder() {
         assertTrue(WakeWordMatcher.isExactAyse("Ayşe"))
         assertTrue(WakeWordMatcher.isExactAyse("AYŞE."))
         assertTrue(WakeWordMatcher.isExactAyse("ayşe!"))
         assertTrue(WakeWordMatcher.isExactAyse("Ayşe")) // decomposed ş becomes NFC
+        assertEquals("sabah 9'a alarm kur", WakeWordMatcher.match("Ayşe, sabah 9'a alarm kur.")?.commandTranscript)
+        assertEquals("saat kaç", WakeWordMatcher.match("AYŞE saat kaç?")?.commandTranscript)
         assertFalse(WakeWordMatcher.isExactAyse("ayse"))
         assertFalse(WakeWordMatcher.isExactAyse("Aisha"))
         assertFalse(WakeWordMatcher.isExactAyse("Hey Robot"))
@@ -22,15 +25,18 @@ class WakeWordDetectionTest {
         assertFalse(WakeWordMatcher.isExactAyse(null))
         listOf("Aylin", "Ayşegül", "Ayşe'nin", "Ayşelik", "Bana Ayşe de", "Ayşe, hava nasıl?")
             .forEach { assertFalse(WakeWordMatcher.isExactAyse(it)) }
+        assertEquals("hava nasıl", WakeWordMatcher.match("Ayşe, hava nasıl?")?.commandTranscript)
+        assertEquals(null, WakeWordMatcher.match("Aylin hava nasıl?"))
+        assertEquals(null, WakeWordMatcher.match("Ayşegül, hava nasıl?"))
     }
 
     @Test
     fun finalResultGateRejectsUnrelatedPartialAndDuplicateResults() {
         val gate = WakeWordDetectionGate()
-        assertFalse(gate.acceptFinalResult("Ayşe merhaba"))
-        assertFalse(gate.acceptFinalResult("[partial: Ayşe]"))
-        assertTrue(gate.acceptFinalResult("Ayşe"))
-        assertFalse(gate.acceptFinalResult("Ayşe"))
+        assertNull(gate.acceptFinalResult("Aylin merhaba"))
+        assertNull(gate.acceptFinalResult("[partial: Ayşe]"))
+        assertEquals("merhaba", gate.acceptFinalResult("Ayşe, merhaba")?.commandTranscript)
+        assertNull(gate.acceptFinalResult("Ayşe"))
 
     }
 
@@ -40,7 +46,7 @@ class WakeWordDetectionTest {
         val engine = FakeWakeWordEngine(listOf(null, "merhaba Ayşe", "AYŞE."))
         val monitor = WakeWordMonitor(source, engine)
         try {
-            assertTrue(monitor.runUntilDetected())
+            assertNotNull(monitor.runUntilDetected())
             assertEquals(3, source.reads)
             assertEquals(MicrophoneOwnership.Owner.WAKE_WORD, source.ownerDuringRead)
             assertEquals(1, source.closes)
@@ -53,12 +59,12 @@ class WakeWordDetectionTest {
     }
 
     @Test
-    fun monitorRejectsSimilarNamesAndNonStandaloneResults() {
+    fun monitorRejectsSimilarNamesAndHandsOffFullAyseCommand() {
         val source = FakeAudioSource(5)
-        val engine = FakeWakeWordEngine(listOf("Aylin", "Ayşegül", "Ayşe'nin", "Ayşe merhaba", "Ayşe"))
+        val engine = FakeWakeWordEngine(listOf("Aylin", "Ayşegül", "Ayşe'nin", "Bana Ayşe de", "Ayşe, saat kaç?"))
         val monitor = WakeWordMonitor(source, engine)
         try {
-            assertTrue(monitor.runUntilDetected())
+            assertEquals("saat kaç", monitor.runUntilDetected()?.commandTranscript)
             assertEquals(5, source.reads)
             assertEquals(1, source.closes)
             assertEquals(1, engine.closes)
@@ -70,14 +76,16 @@ class WakeWordDetectionTest {
     }
 
     @Test
-    fun wakeListenerCanRearmAfterDetectionOrPttPauseOnlyWithOptInPermissionAndSleep() {
+    fun wakeListenerRearmsStaleStatusesAfterRestartOnlyWithOptInPermissionAndSleep() {
         fun canStart(status: WakeWordStatus, enabled: Boolean = true, permission: Boolean = true, sleeping: Boolean = true) =
             WakeWordServiceStartPolicy.shouldStart(enabled, permission, sleeping, status)
 
         assertTrue(canStart(WakeWordStatus.DETECTED))
         assertTrue(canStart(WakeWordStatus.PAUSED))
+        assertTrue(canStart(WakeWordStatus.LISTENING))
+        assertTrue(canStart(WakeWordStatus.STARTING))
+        assertTrue(canStart(WakeWordStatus.LOADING_MODEL))
         assertFalse(canStart(WakeWordStatus.ERROR))
-        assertFalse(canStart(WakeWordStatus.LISTENING))
         assertFalse(canStart(WakeWordStatus.DETECTED, enabled = false))
         assertFalse(canStart(WakeWordStatus.DETECTED, permission = false))
         assertFalse(canStart(WakeWordStatus.DETECTED, sleeping = false))

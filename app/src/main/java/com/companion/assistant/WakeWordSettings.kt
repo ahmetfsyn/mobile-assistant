@@ -21,12 +21,12 @@ internal object WakeWordServiceStartPolicy {
     ): Boolean {
         if (!enabled || !microphonePermissionGranted || !robotSleeping) return false
         return when (status) {
-            WakeWordStatus.STARTING,
-            WakeWordStatus.LOADING_MODEL,
-            WakeWordStatus.LISTENING,
             WakeWordStatus.ERROR -> false
 
             WakeWordStatus.DISABLED,
+            WakeWordStatus.STARTING,
+            WakeWordStatus.LOADING_MODEL,
+            WakeWordStatus.LISTENING,
             WakeWordStatus.PAUSED,
             WakeWordStatus.DETECTED -> true
         }

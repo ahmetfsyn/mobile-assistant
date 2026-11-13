@@ -5,18 +5,26 @@ import java.text.Normalizer
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** Only a completed standalone Turkish Ayşe result can wake the robot. */
+internal data class WakeWordRecognition(val commandTranscript: String?)
+
+/** A completed utterance must start with the standalone Turkish wake word Ayşe. */
 internal object WakeWordMatcher {
     private val turkish = Locale("tr", "TR")
+    private val firstToken = Regex("^([^\\s,.:!?;]+)")
 
     fun isExactAyse(transcript: String?): Boolean {
-        return normalize(transcript) == "ayşe"
+        val recognition = match(transcript) ?: return false
+        return recognition.commandTranscript == null
     }
 
-    private fun normalize(transcript: String?): String = transcript.orEmpty().let {
-        Normalizer.normalize(it.trim(), Normalizer.Form.NFC)
-            .trimEnd { char -> char == '.' || char == ',' || char == '!' || char == '?' || char == ':' || char == ';' }
-            .lowercase(turkish)
+    fun match(transcript: String?): WakeWordRecognition? {
+        val normalized = Normalizer.normalize(transcript.orEmpty().trim(), Normalizer.Form.NFC).lowercase(turkish)
+        val match = firstToken.find(normalized) ?: return null
+        if (match.groupValues[1].trimEnd('.', ',', '!', '?', ':', ';') != "ayşe") return null
+        val remainder = normalized.substring(match.range.last + 1).trimStart { char ->
+            char.isWhitespace() || char == ',' || char == '.' || char == '!' || char == '?' || char == ':' || char == ';'
+        }.trim().trimEnd('.', ',', '!', '?', ':', ';')
+        return WakeWordRecognition(remainder.takeIf(String::isNotBlank))
     }
 }
 
@@ -25,10 +33,11 @@ internal class WakeWordDetectionGate {
     private var emitted = false
 
     @Synchronized
-    fun acceptFinalResult(transcript: String?): Boolean {
-        if (emitted || !WakeWordMatcher.isExactAyse(transcript)) return false
+    fun acceptFinalResult(transcript: String?): WakeWordRecognition? {
+        if (emitted) return null
+        val recognition = WakeWordMatcher.match(transcript) ?: return null
         emitted = true
-        return true
+        return recognition
     }
 
 }
@@ -43,7 +52,7 @@ internal interface WakeWordAudioSource : Closeable {
 }
 
 internal interface WakeWordEngine : Closeable {
-    /** Returns the latest completed local result when available. */
+    /** Returns a completed local utterance when it begins with the configured wake phrase. */
     fun acceptAudio(pcm16le: ByteArray, length: Int): String?
 }
 
@@ -59,24 +68,25 @@ internal class WakeWordMonitor(
     private var lease: MicrophoneOwnership.Lease? = null
 
     @Throws(Exception::class)
-    fun runUntilDetected(): Boolean {
+    fun runUntilDetected(): WakeWordRecognition? {
         try {
             lease = MicrophoneOwnership.acquire(MicrophoneOwnership.Owner.WAKE_WORD)
                 ?: throw IllegalStateException("Mikrofon başka bir işlem tarafından kullanılıyor")
-            if (stopped.get()) return false
+            if (stopped.get()) return null
             if (!source.start()) throw IllegalStateException("Mikrofon kaydı başlatılamadı")
             while (!stopped.get()) {
                 val count = source.read(audioBuffer)
-                if (stopped.get()) return false
+                if (stopped.get()) return null
                 if (count < 0) throw IllegalStateException("Mikrofon ses verisi okunamadı")
                 if (count > audioBuffer.size) throw IllegalStateException("Mikrofon geçersiz ses arabelleği döndürdü")
                 if (count == 0) continue
                 val alignedCount = count and -2 // PCM16 needs complete samples; defer an incomplete last byte.
                 if (alignedCount == 0) continue
                 // Partial hypotheses are unstable and can temporarily turn similar names into Ayşe.
-                if (gate.acceptFinalResult(engine.acceptAudio(audioBuffer, alignedCount))) return true
+                val recognition = gate.acceptFinalResult(engine.acceptAudio(audioBuffer, alignedCount))
+                if (recognition != null) return recognition
             }
-            return false
+            return null
         } finally {
             releaseResources()
         }

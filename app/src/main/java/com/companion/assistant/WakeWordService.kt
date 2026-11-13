@@ -97,14 +97,14 @@ class WakeWordService : Service() {
                 Log.i(TAG, "model_initialized load_ms=${SystemClock.elapsedRealtime() - loadStartedAt}")
                 publishStatus(WakeWordStatus.LISTENING)
                 val listeningStartedAt = SystemClock.elapsedRealtime()
-                val detected = wakeMonitor.runUntilDetected()
+                val detection = wakeMonitor.runUntilDetected()
                 monitor = null
-                if (detected && !stopRequested && settings.isEnabled() && settings.generation() == generation) {
+                if (detection != null && !stopRequested && settings.isEnabled() && settings.generation() == generation) {
                     val listeningElapsed = SystemClock.elapsedRealtime() - listeningStartedAt
                     settings.setWakeEventPending(generation)
                     settings.setStatus(WakeWordStatus.DETECTED)
-                    Log.i(TAG, "wake_detected listening_elapsed_ms=$listeningElapsed")
-                    publishWakeDetected(generation, SystemClock.elapsedRealtime())
+                    Log.i(TAG, "wake_detected listening_elapsed_ms=$listeningElapsed command_handoff=${!detection.commandTranscript.isNullOrBlank()}")
+                    publishWakeDetected(generation, SystemClock.elapsedRealtime(), detection.commandTranscript)
                 } else if (!stopRequested) {
                     fail("MONITOR_STOPPED")
                 }
@@ -172,12 +172,14 @@ class WakeWordService : Service() {
         }
     }
 
-    private fun publishWakeDetected(generation: Long, detectedAtMs: Long) {
+    private fun publishWakeDetected(generation: Long, detectedAtMs: Long, commandTranscript: String?) {
         mainHandler.post {
             val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             manager.cancel(NOTIFICATION_ID)
-            sendBroadcast(Intent(ACTION_WAKE_DETECTED).setPackage(packageName)
-                .putExtra(EXTRA_GENERATION, generation).putExtra(EXTRA_DETECTED_AT_MS, detectedAtMs))
+            val wakeIntent = Intent(ACTION_WAKE_DETECTED).setPackage(packageName)
+                .putExtra(EXTRA_GENERATION, generation).putExtra(EXTRA_DETECTED_AT_MS, detectedAtMs)
+            commandTranscript?.take(500)?.takeIf(String::isNotBlank)?.let { wakeIntent.putExtra(EXTRA_COMMAND_TRANSCRIPT, it) }
+            sendBroadcast(wakeIntent)
             stopForeground(true)
             stopSelf()
         }
@@ -247,6 +249,7 @@ class WakeWordService : Service() {
         const val EXTRA_STATUS = "status"
         const val EXTRA_GENERATION = "monitoring_generation"
         const val EXTRA_DETECTED_AT_MS = "detected_at_elapsed_ms"
+        const val EXTRA_COMMAND_TRANSCRIPT = "wake_command_transcript"
         private const val CHANNEL_ID = "companion_wake_word"
         private const val NOTIFICATION_ID = 731
         private const val TAG = "WakeWordService"
@@ -328,7 +331,7 @@ internal class WakeWordModelInstaller(private val context: Context) {
     }
 }
 
-/** Contrastive local grammar with a completed-result confidence gate. */
+/** Local Turkish recognizer. Complete utterances beginning with Ayşe can be handed to the app. */
 internal class VoskWakeWordEngine(modelDirectory: File) : WakeWordEngine {
     private val model: Model
     private val recognizer: Recognizer
@@ -338,7 +341,7 @@ internal class VoskWakeWordEngine(modelDirectory: File) : WakeWordEngine {
         val loadedModel = Model(modelDirectory.absolutePath)
         model = loadedModel
         recognizer = try {
-            Recognizer(loadedModel, WakeWordMonitor.SAMPLE_RATE_HZ.toFloat(), GRAMMAR).apply {
+            Recognizer(loadedModel, WakeWordMonitor.SAMPLE_RATE_HZ.toFloat()).apply {
                 setWords(true)
             }
         } catch (error: Throwable) {
@@ -353,7 +356,7 @@ internal class VoskWakeWordEngine(modelDirectory: File) : WakeWordEngine {
         val result = JSONObject(recognizer.result)
         val text = result.optString("text").trim()
         val confidence = result.optJSONArray("result")?.optJSONObject(0)?.optDouble("conf", 0.0) ?: 0.0
-        if (!WakeWordMatcher.isExactAyse(text) || confidence < MIN_CONFIDENCE) return null
+        if (WakeWordMatcher.match(text) == null || confidence < MIN_CONFIDENCE) return null
         return text
     }
 
@@ -363,7 +366,6 @@ internal class VoskWakeWordEngine(modelDirectory: File) : WakeWordEngine {
     }
 
     private companion object {
-        const val GRAMMAR = "[\"ayşe\",\"aylin\",\"ayşegül\",\"ayşe'nin\",\"[unk]\"]"
         const val MIN_CONFIDENCE = 0.75
     }
 }

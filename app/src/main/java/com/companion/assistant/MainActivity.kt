@@ -51,6 +51,7 @@ class MainActivity : Activity() {
     private var wakeWordStatusText: TextView? = null
     private var wakeWordReceiverRegistered = false
     private var wakeWordPermissionRequestPending = false
+    private var pendingWakeWordCommandTranscript: String? = null
     private var updatingWakeWordCheckBox = false
     private var reminderReceiverRegistered = false
     private var reminderNetworkCallback: ConnectivityManager.NetworkCallback? = null
@@ -87,6 +88,8 @@ class MainActivity : Activity() {
                     val detectedAtMs = intent.getLongExtra(WakeWordService.EXTRA_DETECTED_AT_MS, -1L)
                     val settings = wakeWordSettingsStore ?: return
                     if (!settings.isEnabled() || settings.generation() != generation) return
+                    pendingWakeWordCommandTranscript = intent.getStringExtra(WakeWordService.EXTRA_COMMAND_TRANSCRIPT)
+                        ?.take(500)?.takeIf(String::isNotBlank)
                     wakeWordSettingsStore?.setStatus(WakeWordStatus.DETECTED)
                     wakeWordSettingsStore?.consumeWakeEventPending()
                     refreshWakeWordControls()
@@ -182,7 +185,8 @@ class MainActivity : Activity() {
             onFaceCueChanged = face::setEmotionCue,
             onAuthenticationRequired = { showSecuritySettings(authenticationRequired = true) },
             reminderCommandProcessor = reminderCommands,
-            nativeAlarmCommandProcessor = NativeAlarmCommandProcessor(applicationContext)
+            nativeAlarmCommandProcessor = NativeAlarmCommandProcessor(applicationContext),
+            localClockCommandProcessor = LocalClockCommandProcessor()
         )
         face.setOnFaceTapListener { onFaceTapped() }
         face.setOnSleepRequestListener { dispatchRobotEvent(RobotEvent.SleepRequested) }
@@ -1007,7 +1011,6 @@ class MainActivity : Activity() {
                 status = settings.status()
             )
         ) return
-        settings.setStatus(WakeWordStatus.STARTING)
         WakeWordServiceControl.start(this)
     }
 
@@ -1067,7 +1070,12 @@ class MainActivity : Activity() {
                     }
                 }
 
-                is RobotEffect.StartListening -> voiceController?.startListening(effect.sessionId)
+                is RobotEffect.StartListening -> {
+                    val wakeTranscript = pendingWakeWordCommandTranscript
+                    pendingWakeWordCommandTranscript = null
+                    if (wakeTranscript.isNullOrBlank()) voiceController?.startListening(effect.sessionId)
+                    else voiceController?.startWithWakeTranscript(effect.sessionId, wakeTranscript)
+                }
                 is RobotEffect.CancelVoiceSession -> voiceController?.cancelSession(effect.sessionId)
             }
         }
