@@ -8,9 +8,18 @@ import java.util.concurrent.atomic.AtomicBoolean
 internal data class WakeWordRecognition(val commandTranscript: String?)
 
 internal object WakeWordConfidencePolicy {
-    const val MINIMUM_CONFIDENCE = 0.55
+    const val MINIMUM_CONFIDENCE = 0.35
 
     fun accepts(confidence: Double): Boolean = confidence >= MINIMUM_CONFIDENCE
+}
+
+/** Canonicalizes the grammar result for immediate wake and optional same-utterance command handoff. */
+internal object WakeWordHandoffPolicy {
+    fun canonicalTranscript(wakeTranscript: String?): String? {
+        val match = WakeWordMatcher.match(wakeTranscript) ?: return null
+        val command = match.commandTranscript?.takeUnless { it.contains("[unk]", ignoreCase = true) }
+        return command?.let { "Ayşe, $it" } ?: "Ayşe"
+    }
 }
 
 /** A completed utterance must start with the standalone Turkish wake word Ayşe. */
@@ -75,30 +84,6 @@ internal object WakeWordAudioStartRetryPolicy {
     const val MAX_RETRIES = 4
 
     fun shouldRetry(attempt: Int): Boolean = attempt in 1..MAX_RETRIES
-}
-
-/** Identifies short utterances that can start listening without decoding a full command. */
-internal object WakeWordFastPathPolicy {
-    const val MAX_AUDIO_DURATION_MS = 2_000L
-
-    fun isShortUtterance(audioDurationMs: Long): Boolean = audioDurationMs in 1..MAX_AUDIO_DURATION_MS
-}
-
-/** Copies the most recent PCM samples for a bounded, independent wake-word confirmation pass. */
-internal object WakeWordAudioWindow {
-    fun trailing(
-        audio: ByteArray,
-        sampleRateHz: Int = WakeWordMonitor.SAMPLE_RATE_HZ,
-        maxWindowMs: Long = 1_200L
-    ): ByteArray {
-        if (sampleRateHz <= 0 || maxWindowMs <= 0L) return audio.copyOf()
-
-        val endByte = audio.size and -2 // PCM16 requires complete samples.
-        val maxBytes = (sampleRateHz * 2L * maxWindowMs / 1_000L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt() and -2
-        val startByte = (endByte - maxBytes).coerceAtLeast(0) and -2
-        if (endByte <= startByte) return audio.copyOfRange(0, endByte)
-        return audio.copyOfRange(startByte, endByte)
-    }
 }
 
 /** Blocking worker-thread loop. Audio, model, and exclusive microphone lease are always released. */

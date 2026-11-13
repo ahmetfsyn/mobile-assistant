@@ -18,40 +18,26 @@ class WakeWordDetectionTest {
     }
 
     @Test
-    fun fastWakePathOnlySkipsFullCommandDecodeForShortUtterances() {
-        assertTrue(WakeWordFastPathPolicy.isShortUtterance(1_408))
-        assertTrue(WakeWordFastPathPolicy.isShortUtterance(1_601))
-        assertFalse(WakeWordFastPathPolicy.isShortUtterance(2_001))
-        assertFalse(WakeWordFastPathPolicy.isShortUtterance(0))
-    }
-
-    @Test
-    fun wakeConfirmationUsesBoundedAudioTailWithAlignedSamples() {
-        val audio = ByteArray(64_000) { (it % 127).toByte() }
-        val window = WakeWordAudioWindow.trailing(audio)
-
-        assertEquals(38_400, window.size)
-        assertEquals(audio[25_600], window.first())
-        assertEquals(audio[63_999], window.last())
-
-        val shorterWindow = WakeWordAudioWindow.trailing(audio, maxWindowMs = 750)
-        assertEquals(24_000, shorterWindow.size)
-        assertEquals(audio[40_000], shorterWindow.first())
-    }
-
-    @Test
-    fun wakeConfirmationKeepsShortAudioAndDropsIncompletePcmSample() {
-        val audio = byteArrayOf(1, 2, 3, 4, 5)
-
-        assertTrue(byteArrayOf(1, 2, 3, 4).contentEquals(WakeWordAudioWindow.trailing(audio)))
-    }
-
-    @Test
-    fun wakeConfidenceAcceptsMeasuredAyseCandidatesAndRejectsLowerScores() {
+    fun wakeConfidenceAcceptsNormalAndBorderlineAyseCandidates() {
         assertTrue(WakeWordConfidencePolicy.accepts(0.573))
         assertTrue(WakeWordConfidencePolicy.accepts(0.683))
         assertTrue(WakeWordConfidencePolicy.accepts(0.697))
-        assertFalse(WakeWordConfidencePolicy.accepts(0.549))
+        assertTrue(WakeWordConfidencePolicy.accepts(0.549))
+    }
+
+    @Test
+    fun wakeConfidenceAcceptsClearerLowConfidenceCandidates() {
+        assertTrue(WakeWordConfidencePolicy.accepts(0.467))
+        assertTrue(WakeWordConfidencePolicy.accepts(0.515))
+        assertFalse(WakeWordConfidencePolicy.accepts(0.349))
+    }
+
+    @Test
+    fun wakeHandoffStartsImmediatelyAndDropsUnknownCommandPlaceholder() {
+        assertEquals("Ayşe", WakeWordHandoffPolicy.canonicalTranscript("AYŞE"))
+        assertEquals("Ayşe", WakeWordHandoffPolicy.canonicalTranscript("Ayşe [unk]"))
+        assertEquals("Ayşe, saat kaç", WakeWordHandoffPolicy.canonicalTranscript("Ayşe, saat kaç?"))
+        assertNull(WakeWordHandoffPolicy.canonicalTranscript("Ayşegül"))
     }
 
     @Test

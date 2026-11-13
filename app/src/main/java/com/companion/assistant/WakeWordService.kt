@@ -419,7 +419,7 @@ internal object VoskWakeWordModelCache {
     }
 }
 
-/** Grammar-constrained local wake decoder with a one-shot full-utterance command handoff. */
+/** Grammar-constrained local wake decoder with immediate detection and optional command handoff. */
 internal class VoskWakeWordEngine(modelDirectory: File) : WakeWordEngine {
     private val modelLease: VoskWakeWordModelCache.Lease
     private val model: Model
@@ -437,7 +437,7 @@ internal class VoskWakeWordEngine(modelDirectory: File) : WakeWordEngine {
         wakeRecognizer = try {
             Recognizer(model, WakeWordMonitor.SAMPLE_RATE_HZ.toFloat(), WAKE_GRAMMAR).apply {
                 setWords(true)
-                // Keep a short pause for a command after “Ayşe” while reducing endpoint delay.
+                // Finalize quickly so speech recognition can start immediately after “Ayşe”.
                 setEndpointerDelays(ENDPOINTER_INITIAL_SILENCE_SECONDS, ENDPOINTER_END_SILENCE_SECONDS, ENDPOINTER_MAX_SECONDS)
             }
         } catch (error: Throwable) {
@@ -458,63 +458,17 @@ internal class VoskWakeWordEngine(modelDirectory: File) : WakeWordEngine {
         val result = JSONObject(wakeRecognizer.result)
         val wakeText = result.optString("text").trim()
         val confidence = result.optJSONArray("result")?.optJSONObject(0)?.optDouble("conf", 0.0) ?: 0.0
-        if (WakeWordMatcher.match(wakeText) == null || !WakeWordConfidencePolicy.accepts(confidence)) {
-            if (WakeWordMatcher.match(wakeText) != null) {
-                Log.i(TAG, "wake_candidate_rejected confidence=$confidence")
-            }
+        val handoffTranscript = WakeWordHandoffPolicy.canonicalTranscript(wakeText)
+        if (handoffTranscript == null || !WakeWordConfidencePolicy.accepts(confidence)) {
+            if (handoffTranscript != null) Log.i(TAG, "wake_candidate_rejected confidence=$confidence")
             utteranceAudio.erase()
             return null
         }
 
-        val audio = utteranceAudio.toByteArray()
+        val audioDurationMs = utteranceAudio.size() * 1_000L / (WakeWordMonitor.SAMPLE_RATE_HZ * 2L)
         utteranceAudio.erase()
-        val audioDurationMs = audio.size * 1_000L / (WakeWordMonitor.SAMPLE_RATE_HZ * 2L)
-        val wakeAudio = WakeWordAudioWindow.trailing(audio)
-        val wakeAudioDurationMs = wakeAudio.size * 1_000L / (WakeWordMonitor.SAMPLE_RATE_HZ * 2L)
-        val shortConfirmationStartedAt = SystemClock.elapsedRealtime()
-        val wakeConfirmation = try {
-            decodeCommandFromSameUtterance(wakeAudio)
-        } finally {
-            wakeAudio.fill(0)
-        }
-        val shortConfirmationDurationMs = SystemClock.elapsedRealtime() - shortConfirmationStartedAt
-        Log.i(TAG, "wake_word_confirmation duration_ms=$shortConfirmationDurationMs audio_ms=$wakeAudioDurationMs exact=${wakeConfirmation.exactWakeWord} similar_name=${wakeConfirmation.similarName}")
-        if (wakeConfirmation.similarName) {
-            Log.i(TAG, "wake_candidate_rejected reason=similar_name confidence=$confidence")
-            audio.fill(0)
-            return null
-        }
-        if (!wakeConfirmation.exactWakeWord) {
-            Log.i(TAG, "wake_candidate_rejected reason=word_not_exactly_confirmed confidence=$confidence")
-            audio.fill(0)
-            return null
-        }
-
-        if (WakeWordFastPathPolicy.isShortUtterance(audioDurationMs)) {
-            Log.i(TAG, "wake_candidate_accepted confidence=$confidence command_handoff=false")
-            audio.fill(0)
-            return "Ayşe"
-        }
-
-        val confirmationStartedAt = SystemClock.elapsedRealtime()
-        val commandDecode = try {
-            decodeCommandFromSameUtterance(audio)
-        } finally {
-            audio.fill(0)
-        }
-        val confirmationDurationMs = SystemClock.elapsedRealtime() - confirmationStartedAt
-        Log.i(TAG, "wake_command_decode duration_ms=$confirmationDurationMs audio_ms=$audioDurationMs exact=${commandDecode.exactWakeWord} similar_name=${commandDecode.similarName} command_handoff=${!commandDecode.transcript.isNullOrBlank()}")
-        if (commandDecode.similarName) {
-            Log.i(TAG, "wake_candidate_rejected reason=similar_name confidence=$confidence")
-            return null
-        }
-        val commandTranscript = commandDecode.transcript
-        if (commandTranscript.isNullOrBlank() && !commandDecode.exactWakeWord) {
-            Log.i(TAG, "wake_candidate_rejected reason=not_exactly_confirmed confidence=$confidence")
-            return null
-        }
-        Log.i(TAG, "wake_candidate_accepted confidence=$confidence command_handoff=${!commandTranscript.isNullOrBlank()}")
-        return commandTranscript ?: "Ayşe"
+        Log.i(TAG, "wake_candidate_accepted confidence=$confidence audio_ms=$audioDurationMs command_handoff=${handoffTranscript != "Ayşe"}")
+        return handoffTranscript
     }
 
     override fun close() {
@@ -523,37 +477,9 @@ internal class VoskWakeWordEngine(modelDirectory: File) : WakeWordEngine {
         try { wakeRecognizer.close() } finally { modelLease.close() }
     }
 
-    private fun decodeCommandFromSameUtterance(audio: ByteArray): CommandDecode {
-        if (audio.isEmpty()) return CommandDecode()
-        val decoder = Recognizer(model, WakeWordMonitor.SAMPLE_RATE_HZ.toFloat()).apply { setWords(true) }
-        return try {
-            val ended = decoder.acceptWaveForm(audio, audio.size)
-            val resultText = if (ended) {
-                JSONObject(decoder.result).optString("text").trim()
-            } else {
-                JSONObject(decoder.finalResult).optString("text").trim()
-            }
-            if (WakeWordMatcher.isKnownConfusableStart(resultText)) return CommandDecode(similarName = true)
-            val match = WakeWordMatcher.match(resultText) ?: return CommandDecode()
-            if (match.commandTranscript?.contains("[unk]") == true) return CommandDecode()
-            if (match.commandTranscript == null) CommandDecode(exactWakeWord = true) else CommandDecode(resultText)
-        } catch (error: RuntimeException) {
-            Log.w(TAG, "wake_command_handoff_failed type=${error.javaClass.simpleName}")
-            CommandDecode()
-        } finally {
-            decoder.close()
-        }
-    }
-
-    private data class CommandDecode(
-        val transcript: String? = null,
-        val similarName: Boolean = false,
-        val exactWakeWord: Boolean = false
-    )
-
     private companion object {
         const val TAG = "WakeWordService"
-        const val WAKE_GRAMMAR = "[\"ayşe\",\"aylin\",\"ayşegül\",\"ayşe'nin\",\"[unk]\"]"
+        const val WAKE_GRAMMAR = "[\"ayşe\",\"[unk]\"]"
         // Flush empty silence more often so command confirmation does not decode seconds of idle audio.
         const val ENDPOINTER_INITIAL_SILENCE_SECONDS = 1.5f
         const val ENDPOINTER_END_SILENCE_SECONDS = 0.4f
