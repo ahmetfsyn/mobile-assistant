@@ -22,6 +22,7 @@ import org.json.JSONObject
 import org.vosk.Model
 import org.vosk.Recognizer
 import java.io.ByteArrayOutputStream
+import java.io.Closeable
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.ExecutorService
@@ -74,6 +75,7 @@ class WakeWordService : Service() {
         }
         if (monitorTask?.isDone == false) return
 
+        VoskWakeWordModelCache.setRetentionEnabled(true)
         stopRequested = false
         publishStatus(WakeWordStatus.LOADING_MODEL)
         val generation = settings.generation()
@@ -95,7 +97,7 @@ class WakeWordService : Service() {
                     wakeMonitor.close()
                     return@submit
                 }
-                Log.i(TAG, "model_initialized load_ms=${SystemClock.elapsedRealtime() - loadStartedAt}")
+                Log.i(TAG, "model_initialized load_ms=${SystemClock.elapsedRealtime() - loadStartedAt} reused=${engine.reusedModel}")
                 publishStatus(WakeWordStatus.LISTENING)
                 val listeningStartedAt = SystemClock.elapsedRealtime()
                 val detection = wakeMonitor.runUntilDetected()
@@ -134,6 +136,7 @@ class WakeWordService : Service() {
         Log.w(TAG, "monitor_unavailable reason=$reason")
         settings.setEnabled(false)
         settings.setStatus(WakeWordStatus.ERROR)
+        VoskWakeWordModelCache.setRetentionEnabled(false)
         publishStatus(WakeWordStatus.ERROR)
         mainHandler.post {
             stopForeground(true)
@@ -144,7 +147,10 @@ class WakeWordService : Service() {
     private fun stopMonitoring(status: WakeWordStatus) {
         stopRequested = true
         monitor?.close()
-        if (status == WakeWordStatus.DISABLED) settings.setEnabled(false)
+        if (status == WakeWordStatus.DISABLED) {
+            settings.setEnabled(false)
+            VoskWakeWordModelCache.setRetentionEnabled(false)
+        }
         settings.setStatus(status)
         publishStatus(status)
         mainHandler.post {
@@ -332,24 +338,88 @@ internal class WakeWordModelInstaller(private val context: Context) {
     }
 }
 
+/** Keeps the native Vosk model warm between wake sessions while monitoring remains opted in. */
+internal object VoskWakeWordModelCache {
+    private var model: Model? = null
+    private var modelPath: String? = null
+    private var activeLeases = 0
+    private var retentionEnabled = false
+
+    @Synchronized
+    fun setRetentionEnabled(enabled: Boolean) {
+        retentionEnabled = enabled
+        releaseIfUnused()
+    }
+
+    @Synchronized
+    fun acquire(modelDirectory: File): Lease {
+        val path = modelDirectory.canonicalPath
+        var current = model
+        val reused = current != null && modelPath == path
+        if (current != null && modelPath != path) {
+            check(activeLeases == 0) { "Cannot replace a Vosk model while it is in use" }
+            runCatching { current.close() }
+            model = null
+            modelPath = null
+            current = null
+        }
+        val loaded = current ?: Model(path).also {
+            model = it
+            modelPath = path
+        }
+        activeLeases++
+        return Lease(loaded, reused, ::release)
+    }
+
+    @Synchronized
+    private fun release() {
+        if (activeLeases > 0) activeLeases--
+        releaseIfUnused()
+    }
+
+    private fun releaseIfUnused() {
+        if (retentionEnabled || activeLeases != 0) return
+        runCatching { model?.close() }
+        model = null
+        modelPath = null
+    }
+
+    class Lease internal constructor(
+        val model: Model,
+        val reused: Boolean,
+        private val releaseModel: () -> Unit
+    ) : Closeable {
+        private val closed = AtomicBoolean(false)
+
+        override fun close() {
+            if (closed.compareAndSet(false, true)) releaseModel()
+        }
+    }
+}
+
 /** Grammar-constrained local wake decoder with a one-shot full-utterance command handoff. */
 internal class VoskWakeWordEngine(modelDirectory: File) : WakeWordEngine {
+    private val modelLease: VoskWakeWordModelCache.Lease
     private val model: Model
     private val wakeRecognizer: Recognizer
     private val closed = AtomicBoolean(false)
     private val utteranceAudio = WipingAudioBuffer(MAX_UTTERANCE_BYTES)
 
+    val reusedModel: Boolean
+        get() = modelLease.reused
+
     init {
-        val loadedModel = Model(modelDirectory.absolutePath)
-        model = loadedModel
+        val lease = VoskWakeWordModelCache.acquire(modelDirectory)
+        modelLease = lease
+        model = lease.model
         wakeRecognizer = try {
-            Recognizer(loadedModel, WakeWordMonitor.SAMPLE_RATE_HZ.toFloat(), WAKE_GRAMMAR).apply {
+            Recognizer(model, WakeWordMonitor.SAMPLE_RATE_HZ.toFloat(), WAKE_GRAMMAR).apply {
                 setWords(true)
                 // Keep a short pause for a command after “Ayşe” while reducing endpoint delay.
                 setEndpointerDelays(ENDPOINTER_INITIAL_SILENCE_SECONDS, ENDPOINTER_END_SILENCE_SECONDS, ENDPOINTER_MAX_SECONDS)
             }
         } catch (error: Throwable) {
-            loadedModel.close()
+            modelLease.close()
             throw error
         }
     }
@@ -397,7 +467,7 @@ internal class VoskWakeWordEngine(modelDirectory: File) : WakeWordEngine {
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
         utteranceAudio.erase()
-        try { wakeRecognizer.close() } finally { model.close() }
+        try { wakeRecognizer.close() } finally { modelLease.close() }
     }
 
     private fun decodeCommandFromSameUtterance(audio: ByteArray): CommandDecode {
