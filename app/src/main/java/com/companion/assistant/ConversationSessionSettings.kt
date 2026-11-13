@@ -3,8 +3,8 @@ package com.companion.assistant
 import android.content.Context
 
 internal object ConversationSessionPolicy {
-    const val DEFAULT_TIMEOUT_SECONDS = 20
-    val timeoutOptionsSeconds = listOf(0, 10, 20, 30, 60)
+    const val DEFAULT_TIMEOUT_SECONDS = 5
+    val timeoutOptionsSeconds = listOf(0, 5, 10, 20, 30, 60)
 
     fun timeoutMillis(seconds: Int): Long = when (seconds) {
         in timeoutOptionsSeconds -> seconds * 1_000L
@@ -12,6 +12,9 @@ internal object ConversationSessionPolicy {
     }
 
     fun shouldArmTimeoutAfterRetry(timeoutAlreadyPending: Boolean): Boolean = !timeoutAlreadyPending
+
+    fun shouldRetryAfterFollowUpFailure(speechDetected: Boolean, timeoutAlreadyPending: Boolean): Boolean =
+        speechDetected || !timeoutAlreadyPending
 
     fun label(seconds: Int): String = if (seconds == 0) "Kapalı" else "$seconds saniye"
 }

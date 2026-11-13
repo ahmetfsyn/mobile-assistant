@@ -5,8 +5,8 @@ import org.junit.Test
 
 class ConversationSessionSettingsTest {
     @Test
-    fun defaultSessionTimeoutIsTwentySecondsAndCanBeDisabled() {
-        assertEquals(20_000L, ConversationSessionPolicy.timeoutMillis(ConversationSessionPolicy.DEFAULT_TIMEOUT_SECONDS))
+    fun defaultFollowUpWindowIsFiveSecondsAndCanBeAdjusted() {
+        assertEquals(5_000L, ConversationSessionPolicy.timeoutMillis(ConversationSessionPolicy.DEFAULT_TIMEOUT_SECONDS))
         assertEquals(0L, ConversationSessionPolicy.timeoutMillis(0))
         assertEquals(10_000L, ConversationSessionPolicy.timeoutMillis(10))
         assertEquals(60_000L, ConversationSessionPolicy.timeoutMillis(60))
@@ -14,7 +14,7 @@ class ConversationSessionSettingsTest {
 
     @Test
     fun unsupportedTimeoutFallsBackToTheSafeDefault() {
-        assertEquals(20_000L, ConversationSessionPolicy.timeoutMillis(7))
+        assertEquals(5_000L, ConversationSessionPolicy.timeoutMillis(7))
         assertEquals("Kapalı", ConversationSessionPolicy.label(0))
         assertEquals("20 saniye", ConversationSessionPolicy.label(20))
     }
@@ -23,5 +23,12 @@ class ConversationSessionSettingsTest {
     fun followUpRetryPreservesPendingTimeoutAndRearmsOnlyWhenMissing() {
         assertEquals(false, ConversationSessionPolicy.shouldArmTimeoutAfterRetry(timeoutAlreadyPending = true))
         assertEquals(true, ConversationSessionPolicy.shouldArmTimeoutAfterRetry(timeoutAlreadyPending = false))
+    }
+
+    @Test
+    fun silentFollowUpFailureDoesNotOpenAnotherMicrophoneSession() {
+        assertEquals(false, ConversationSessionPolicy.shouldRetryAfterFollowUpFailure(speechDetected = false, timeoutAlreadyPending = true))
+        assertEquals(true, ConversationSessionPolicy.shouldRetryAfterFollowUpFailure(speechDetected = true, timeoutAlreadyPending = true))
+        assertEquals(true, ConversationSessionPolicy.shouldRetryAfterFollowUpFailure(speechDetected = false, timeoutAlreadyPending = false))
     }
 }

@@ -40,6 +40,7 @@ internal class VoiceInteractionController(
     @Volatile private var activeInteractionId: String? = null
     @Volatile private var activeMicrophoneLease: MicrophoneOwnership.Lease? = null
     @Volatile private var recognitionStartedAtMs = 0L
+    @Volatile private var speechStartedAtMs = 0L
     @Volatile private var speechEndedAtMs = 0L
     @Volatile private var requestStartedAtMs = 0L
     @Volatile private var replyReadyAtMs = 0L
@@ -91,6 +92,7 @@ internal class VoiceInteractionController(
         activeSessionId = sessionId
         conversationSessionId = sessionId
         recognitionStartedAtMs = SystemClock.elapsedRealtime()
+        speechStartedAtMs = 0L
         speechEndedAtMs = 0L
         requestStartedAtMs = 0L
         replyReadyAtMs = 0L
@@ -117,6 +119,7 @@ internal class VoiceInteractionController(
             speechInput.startListening(sessionId, language, object : SpeechInput.Callback {
                 override fun onSpeechStarted(sessionId: Long) = dispatchOnMain {
                     if (activeSessionId != sessionId || activeInteractionId != interactionId) return@dispatchOnMain
+                    speechStartedAtMs = SystemClock.elapsedRealtime()
                     cancelNoCommandTimeout()
                     if (followUp) scheduleConversationSessionTimeout(sessionId)
                     Log.i(TAG, "command_speech_started interactionId=$interactionId session=$sessionId follow_up=$followUp after_listen_ms=${SystemClock.elapsedRealtime() - recognitionStartedAtMs}")
@@ -837,12 +840,21 @@ internal class VoiceInteractionController(
         if (robotCore.snapshot.activity in setOf(RobotActivityState.LISTENING, RobotActivityState.THINKING)) {
             robotCore.dispatch(RobotEvent.FollowUpListeningEnded(sessionId))
         }
-        Log.i(TAG, "follow_up_listening_retry session=$sessionId reason=$reason")
+        val timeoutAlreadyPending = conversationSessionTimeout != null
         // Keep the deadline established after the last reply. Silent recognition retries must not
         // extend the open-mic session forever; real speech refreshes it in onSpeechStarted().
-        if (ConversationSessionPolicy.shouldArmTimeoutAfterRetry(conversationSessionTimeout != null)) {
+        if (ConversationSessionPolicy.shouldArmTimeoutAfterRetry(timeoutAlreadyPending)) {
             scheduleConversationSessionTimeout(sessionId)
         }
+        if (!ConversationSessionPolicy.shouldRetryAfterFollowUpFailure(
+                speechDetected = speechStartedAtMs > 0L,
+                timeoutAlreadyPending = timeoutAlreadyPending
+            )
+        ) {
+            Log.i(TAG, "follow_up_idle_waiting_for_timeout session=$sessionId reason=$reason")
+            return
+        }
+        Log.i(TAG, "follow_up_listening_retry session=$sessionId reason=$reason")
         cancelFollowUpRetry()
         lateinit var retry: Runnable
         retry = Runnable {
