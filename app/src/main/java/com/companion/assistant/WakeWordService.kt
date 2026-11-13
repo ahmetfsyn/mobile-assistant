@@ -364,7 +364,7 @@ internal class VoskWakeWordEngine(modelDirectory: File) : WakeWordEngine {
         val result = JSONObject(wakeRecognizer.result)
         val wakeText = result.optString("text").trim()
         val confidence = result.optJSONArray("result")?.optJSONObject(0)?.optDouble("conf", 0.0) ?: 0.0
-        if (WakeWordMatcher.match(wakeText) == null || confidence < MIN_CONFIDENCE) {
+        if (WakeWordMatcher.match(wakeText) == null || !WakeWordConfidencePolicy.accepts(confidence)) {
             if (WakeWordMatcher.match(wakeText) != null) {
                 Log.i(TAG, "wake_candidate_rejected confidence=$confidence")
             }
@@ -412,7 +412,6 @@ internal class VoskWakeWordEngine(modelDirectory: File) : WakeWordEngine {
     private companion object {
         const val TAG = "WakeWordService"
         const val WAKE_GRAMMAR = "[\"ayşe\",\"aylin\",\"ayşegül\",\"ayşe'nin\",\"[unk]\"]"
-        const val MIN_CONFIDENCE = 0.75
         const val MAX_UTTERANCE_BYTES = WakeWordMonitor.SAMPLE_RATE_HZ * 2 * 15
     }
 

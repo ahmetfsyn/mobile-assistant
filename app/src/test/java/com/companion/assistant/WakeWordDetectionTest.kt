@@ -10,6 +10,13 @@ import java.io.IOException
 
 class WakeWordDetectionTest {
     @Test
+    fun wakeConfidenceAcceptsMeasuredAyseCandidatesAndRejectsLowerScores() {
+        assertTrue(WakeWordConfidencePolicy.accepts(0.683))
+        assertTrue(WakeWordConfidencePolicy.accepts(0.697))
+        assertFalse(WakeWordConfidencePolicy.accepts(0.649))
+    }
+
+    @Test
     fun matcherRequiresAyseAsFirstStandaloneWordAndKeepsCommandRemainder() {
         assertTrue(WakeWordMatcher.isExactAyse("Ayşe"))
         assertTrue(WakeWordMatcher.isExactAyse("AYŞE."))
@@ -77,8 +84,8 @@ class WakeWordDetectionTest {
 
     @Test
     fun wakeListenerRearmsStaleStatusesAfterRestartOnlyWithOptInPermissionAndSleep() {
-        fun canStart(status: WakeWordStatus, enabled: Boolean = true, permission: Boolean = true, sleeping: Boolean = true) =
-            WakeWordServiceStartPolicy.shouldStart(enabled, permission, sleeping, status)
+        fun canStart(status: WakeWordStatus, enabled: Boolean = true, permission: Boolean = true, wakeAllowed: Boolean = true) =
+            WakeWordServiceStartPolicy.shouldStart(enabled, permission, wakeAllowed, status)
 
         assertTrue(canStart(WakeWordStatus.DETECTED))
         assertTrue(canStart(WakeWordStatus.PAUSED))
@@ -88,7 +95,12 @@ class WakeWordDetectionTest {
         assertFalse(canStart(WakeWordStatus.ERROR))
         assertFalse(canStart(WakeWordStatus.DETECTED, enabled = false))
         assertFalse(canStart(WakeWordStatus.DETECTED, permission = false))
-        assertFalse(canStart(WakeWordStatus.DETECTED, sleeping = false))
+        assertFalse(canStart(WakeWordStatus.DETECTED, wakeAllowed = false))
+        assertTrue(WakeWordServiceStartPolicy.canMonitor(RobotActivityState.SESSION_TIMEOUT))
+        assertTrue(WakeWordServiceStartPolicy.canMonitor(RobotActivityState.RETURNING_TO_SLEEP))
+        assertTrue(WakeWordServiceStartPolicy.canMonitor(RobotActivityState.SLEEPING))
+        assertTrue(WakeWordServiceStartPolicy.canMonitor(RobotActivityState.AWAKE_GRACE))
+        assertFalse(WakeWordServiceStartPolicy.canMonitor(RobotActivityState.SPEAKING))
     }
 
     @Test

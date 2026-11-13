@@ -13,13 +13,20 @@ internal enum class WakeWordStatus(val label: String) {
 }
 
 internal object WakeWordServiceStartPolicy {
+    fun canMonitor(activity: RobotActivityState): Boolean = activity in setOf(
+        RobotActivityState.SESSION_TIMEOUT,
+        RobotActivityState.RETURNING_TO_SLEEP,
+        RobotActivityState.SLEEPING,
+        RobotActivityState.AWAKE_GRACE
+    )
+
     fun shouldStart(
         enabled: Boolean,
         microphonePermissionGranted: Boolean,
-        robotSleeping: Boolean,
+        wakeListeningAllowed: Boolean,
         status: WakeWordStatus
     ): Boolean {
-        if (!enabled || !microphonePermissionGranted || !robotSleeping) return false
+        if (!enabled || !microphonePermissionGranted || !wakeListeningAllowed) return false
         return when (status) {
             WakeWordStatus.ERROR -> false
 

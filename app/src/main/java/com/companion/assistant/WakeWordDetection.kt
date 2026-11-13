@@ -7,6 +7,12 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 internal data class WakeWordRecognition(val commandTranscript: String?)
 
+internal object WakeWordConfidencePolicy {
+    const val MINIMUM_CONFIDENCE = 0.65
+
+    fun accepts(confidence: Double): Boolean = confidence >= MINIMUM_CONFIDENCE
+}
+
 /** A completed utterance must start with the standalone Turkish wake word Ayşe. */
 internal object WakeWordMatcher {
     private val turkish = Locale("tr", "TR")

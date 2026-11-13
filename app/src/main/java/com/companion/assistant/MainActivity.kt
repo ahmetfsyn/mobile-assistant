@@ -1042,7 +1042,7 @@ class MainActivity : Activity() {
         if (!WakeWordServiceStartPolicy.shouldStart(
                 enabled = settings.isEnabled(),
                 microphonePermissionGranted = hasMicrophonePermission(),
-                robotSleeping = core.snapshot.activity in setOf(RobotActivityState.SLEEPING, RobotActivityState.AWAKE_GRACE),
+                wakeListeningAllowed = WakeWordServiceStartPolicy.canMonitor(core.snapshot.activity),
                 status = settings.status()
             )
         ) return
@@ -1187,11 +1187,13 @@ class MainActivity : Activity() {
         ) pauseWakeWordMonitoringForInteraction()
 
         if (previous.activity != current.activity &&
-            current.activity in setOf(RobotActivityState.SLEEPING, RobotActivityState.AWAKE_GRACE) && ReminderHost.isVisible
+            !WakeWordServiceStartPolicy.canMonitor(previous.activity) &&
+            WakeWordServiceStartPolicy.canMonitor(current.activity) && ReminderHost.isVisible
         ) {
             mainHandler.post {
-                if (ReminderHost.isVisible && robotCore?.snapshot?.activity in
-                    setOf(RobotActivityState.SLEEPING, RobotActivityState.AWAKE_GRACE)) {
+                if (ReminderHost.isVisible &&
+                    WakeWordServiceStartPolicy.canMonitor(robotCore?.snapshot?.activity ?: RobotActivityState.CLOSED)
+                ) {
                     ensureWakeWordServiceForOptIn()
                 }
             }

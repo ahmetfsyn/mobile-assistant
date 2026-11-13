@@ -374,6 +374,24 @@ class RobotCoreTest {
     }
 
     @Test
+    fun localWakeDetectionCanInterruptTheReturnToSleepAnimation() {
+        val core = readyCoreWithMicrophone()
+        core.dispatch(RobotEvent.WakeWordMonitoringChanged(true))
+        val started = startListening(core)
+        core.dispatch(RobotEvent.TranscriptReady(started.sessionId, hasText = true))
+        core.dispatch(RobotEvent.ConversationReady(started.sessionId, hasReply = true))
+        core.dispatch(RobotEvent.SpeechCompleted(started.sessionId))
+        core.dispatch(RobotEvent.AwakeGraceElapsed(core.snapshot.sessionId))
+        assertEquals(RobotActivityState.RETURNING_TO_SLEEP, core.snapshot.activity)
+
+        assertEquals(
+            listOf(RobotEffect.StartListening(core.snapshot.sessionId + 1L)),
+            core.dispatch(RobotEvent.WakeWordDetected)
+        )
+        assertEquals(RobotActivityState.LISTENING, core.snapshot.activity)
+    }
+
+    @Test
     fun noSpeechTimeoutReturnsWakeWordInteractionToSleep() {
         val core = readyCoreWithMicrophone()
         core.dispatch(RobotEvent.WakeWordMonitoringChanged(true))

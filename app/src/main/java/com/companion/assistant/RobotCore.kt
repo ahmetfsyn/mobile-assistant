@@ -215,7 +215,7 @@ internal class RobotCore(
         }
 
         RobotEvent.WakeWordDetected -> {
-            if (hostResumed && snapshot.activity in setOf(RobotActivityState.SLEEPING, RobotActivityState.AWAKE_GRACE) &&
+            if (hostResumed && WakeWordServiceStartPolicy.canMonitor(snapshot.activity) &&
                 snapshot.consent.wakeWordMonitoringEnabled && snapshot.consent.microphonePermissionGranted
             ) startListening() else emptyList()
         }
