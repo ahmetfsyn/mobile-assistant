@@ -80,6 +80,15 @@ internal object WakeWordAudioStartRetryPolicy {
     fun shouldRetry(attempt: Int): Boolean = attempt in 1..MAX_RETRIES
 }
 
+/** Avoid a second full-model pass for a short, confident wake-only utterance. */
+internal object WakeWordFastPathPolicy {
+    const val MINIMUM_CONFIDENCE = 0.85
+    const val MAX_AUDIO_DURATION_MS = 1_600L
+
+    fun canSkipCommandConfirmation(confidence: Double, audioDurationMs: Long): Boolean =
+        confidence >= MINIMUM_CONFIDENCE && audioDurationMs in 1..MAX_AUDIO_DURATION_MS
+}
+
 /** Blocking worker-thread loop. Audio, model, and exclusive microphone lease are always released. */
 internal class WakeWordMonitor(
     private val source: WakeWordAudioSource,

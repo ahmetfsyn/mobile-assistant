@@ -18,6 +18,14 @@ class WakeWordDetectionTest {
     }
 
     @Test
+    fun fastWakePathSkipsSecondDecodeOnlyForShortConfidentUtterances() {
+        assertTrue(WakeWordFastPathPolicy.canSkipCommandConfirmation(0.886, 1_408))
+        assertFalse(WakeWordFastPathPolicy.canSkipCommandConfirmation(0.849, 1_408))
+        assertFalse(WakeWordFastPathPolicy.canSkipCommandConfirmation(0.99, 1_601))
+        assertFalse(WakeWordFastPathPolicy.canSkipCommandConfirmation(0.99, 0))
+    }
+
+    @Test
     fun wakeConfidenceAcceptsMeasuredAyseCandidatesAndRejectsLowerScores() {
         assertTrue(WakeWordConfidencePolicy.accepts(0.573))
         assertTrue(WakeWordConfidencePolicy.accepts(0.683))

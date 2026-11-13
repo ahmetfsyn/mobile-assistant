@@ -468,6 +468,14 @@ internal class VoskWakeWordEngine(modelDirectory: File) : WakeWordEngine {
 
         val audio = utteranceAudio.toByteArray()
         utteranceAudio.erase()
+        val audioDurationMs = audio.size * 1_000L / (WakeWordMonitor.SAMPLE_RATE_HZ * 2L)
+        if (WakeWordFastPathPolicy.canSkipCommandConfirmation(confidence, audioDurationMs)) {
+            Log.i(TAG, "wake_confirmation_skipped reason=short_confident_wake audio_ms=$audioDurationMs")
+            Log.i(TAG, "wake_candidate_accepted confidence=$confidence command_handoff=false")
+            audio.fill(0)
+            return "Ayşe"
+        }
+
         val confirmationStartedAt = SystemClock.elapsedRealtime()
         val commandDecode = try {
             decodeCommandFromSameUtterance(audio)
@@ -475,7 +483,6 @@ internal class VoskWakeWordEngine(modelDirectory: File) : WakeWordEngine {
             audio.fill(0)
         }
         val confirmationDurationMs = SystemClock.elapsedRealtime() - confirmationStartedAt
-        val audioDurationMs = audio.size * 1_000L / (WakeWordMonitor.SAMPLE_RATE_HZ * 2L)
         Log.i(TAG, "wake_confirmation duration_ms=$confirmationDurationMs audio_ms=$audioDurationMs similar_name=${commandDecode.similarName} command_handoff=${!commandDecode.transcript.isNullOrBlank()}")
         if (commandDecode.similarName) {
             Log.i(TAG, "wake_candidate_rejected reason=similar_name confidence=$confidence")
