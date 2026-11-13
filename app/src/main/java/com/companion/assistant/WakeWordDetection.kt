@@ -84,28 +84,19 @@ internal object WakeWordFastPathPolicy {
     fun isShortUtterance(audioDurationMs: Long): Boolean = audioDurationMs in 1..MAX_AUDIO_DURATION_MS
 }
 
-/** Copies a short PCM window around Vosk's first-word timing, with context for acoustic confirmation. */
+/** Copies the most recent PCM samples for a bounded, independent wake-word confirmation pass. */
 internal object WakeWordAudioWindow {
-    fun aroundFirstWord(
+    fun trailing(
         audio: ByteArray,
-        startSeconds: Double?,
-        endSeconds: Double?,
         sampleRateHz: Int = WakeWordMonitor.SAMPLE_RATE_HZ,
-        paddingMs: Long = 150L,
         maxWindowMs: Long = 1_200L
     ): ByteArray {
-        if (startSeconds == null || endSeconds == null || !startSeconds.isFinite() || !endSeconds.isFinite() ||
-            startSeconds < 0.0 || endSeconds <= startSeconds || sampleRateHz <= 0
-        ) return audio.copyOf()
+        if (sampleRateHz <= 0 || maxWindowMs <= 0L) return audio.copyOf()
 
-        val bytesPerSecond = sampleRateHz * 2L
-        val paddingBytes = bytesPerSecond * paddingMs / 1_000L
-        val startByte = ((startSeconds * bytesPerSecond).toLong() - paddingBytes)
-            .coerceAtLeast(0L).toInt() and -2
-        val requestedEndByte = (endSeconds * bytesPerSecond).toLong() + paddingBytes
-        val maxEndByte = startByte.toLong() + bytesPerSecond * maxWindowMs / 1_000L
-        val endByte = requestedEndByte.coerceAtMost(maxEndByte).coerceAtMost(audio.size.toLong()).toInt() and -2
-        if (endByte <= startByte) return audio.copyOf()
+        val endByte = audio.size and -2 // PCM16 requires complete samples.
+        val maxBytes = (sampleRateHz * 2L * maxWindowMs / 1_000L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt() and -2
+        val startByte = (endByte - maxBytes).coerceAtLeast(0) and -2
+        if (endByte <= startByte) return audio.copyOfRange(0, endByte)
         return audio.copyOfRange(startByte, endByte)
     }
 }

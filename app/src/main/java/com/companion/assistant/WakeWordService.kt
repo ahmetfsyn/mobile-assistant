@@ -469,10 +469,7 @@ internal class VoskWakeWordEngine(modelDirectory: File) : WakeWordEngine {
         val audio = utteranceAudio.toByteArray()
         utteranceAudio.erase()
         val audioDurationMs = audio.size * 1_000L / (WakeWordMonitor.SAMPLE_RATE_HZ * 2L)
-        val firstWord = result.optJSONArray("result")?.optJSONObject(0)
-        val firstWordStart = firstWord?.optDouble("start")?.takeIf { firstWord.has("start") }
-        val firstWordEnd = firstWord?.optDouble("end")?.takeIf { firstWord.has("end") }
-        val wakeAudio = WakeWordAudioWindow.aroundFirstWord(audio, firstWordStart, firstWordEnd)
+        val wakeAudio = WakeWordAudioWindow.trailing(audio)
         val wakeAudioDurationMs = wakeAudio.size * 1_000L / (WakeWordMonitor.SAMPLE_RATE_HZ * 2L)
         val shortConfirmationStartedAt = SystemClock.elapsedRealtime()
         val wakeConfirmation = try {
@@ -481,7 +478,7 @@ internal class VoskWakeWordEngine(modelDirectory: File) : WakeWordEngine {
             wakeAudio.fill(0)
         }
         val shortConfirmationDurationMs = SystemClock.elapsedRealtime() - shortConfirmationStartedAt
-        Log.i(TAG, "wake_word_confirmation duration_ms=$shortConfirmationDurationMs audio_ms=$wakeAudioDurationMs timing_available=${firstWordStart != null && firstWordEnd != null} exact=${wakeConfirmation.exactWakeWord} similar_name=${wakeConfirmation.similarName}")
+        Log.i(TAG, "wake_word_confirmation duration_ms=$shortConfirmationDurationMs audio_ms=$wakeAudioDurationMs exact=${wakeConfirmation.exactWakeWord} similar_name=${wakeConfirmation.similarName}")
         if (wakeConfirmation.similarName) {
             Log.i(TAG, "wake_candidate_rejected reason=similar_name confidence=$confidence")
             audio.fill(0)

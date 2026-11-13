@@ -26,23 +26,24 @@ class WakeWordDetectionTest {
     }
 
     @Test
-    fun shortWakeConfirmationUsesWordWindowWithPaddingAndAlignedSamples() {
+    fun wakeConfirmationUsesBoundedAudioTailWithAlignedSamples() {
         val audio = ByteArray(64_000) { (it % 127).toByte() }
-        val window = WakeWordAudioWindow.aroundFirstWord(audio, 1.0, 1.5, paddingMs = 100)
+        val window = WakeWordAudioWindow.trailing(audio)
 
-        assertEquals(22_400, window.size)
-        assertEquals(audio[28_800], window.first())
-        assertEquals(audio[51_199], window.last())
+        assertEquals(38_400, window.size)
+        assertEquals(audio[25_600], window.first())
+        assertEquals(audio[63_999], window.last())
 
-        val cappedWindow = WakeWordAudioWindow.aroundFirstWord(audio, 0.0, 2.5)
-        assertEquals(38_400, cappedWindow.size)
+        val shorterWindow = WakeWordAudioWindow.trailing(audio, maxWindowMs = 750)
+        assertEquals(24_000, shorterWindow.size)
+        assertEquals(audio[40_000], shorterWindow.first())
     }
 
     @Test
-    fun shortWakeConfirmationFallsBackToWholeAudioWhenWordTimingIsUnavailable() {
-        val audio = byteArrayOf(1, 2, 3, 4)
+    fun wakeConfirmationKeepsShortAudioAndDropsIncompletePcmSample() {
+        val audio = byteArrayOf(1, 2, 3, 4, 5)
 
-        assertTrue(audio.contentEquals(WakeWordAudioWindow.aroundFirstWord(audio, null, null)))
+        assertTrue(byteArrayOf(1, 2, 3, 4).contentEquals(WakeWordAudioWindow.trailing(audio)))
     }
 
     @Test
