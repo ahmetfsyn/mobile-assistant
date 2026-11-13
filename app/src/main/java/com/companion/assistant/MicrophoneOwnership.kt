@@ -4,7 +4,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /** Process-wide guard for the app's microphone consumers. A lease releases only its own claim. */
 internal object MicrophoneOwnership {
-    enum class Owner { WAKE_WORD, PUSH_TO_TALK }
+    enum class Owner { WAKE_WORD, PUSH_TO_TALK, BARGE_IN }
 
     class Lease internal constructor(
         val owner: Owner,

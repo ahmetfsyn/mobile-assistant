@@ -44,6 +44,7 @@ class MainActivity : Activity() {
     private var reminderStore: ReminderStore? = null
     private var reminderSettingsStore: ReminderSettingsStore? = null
     private var wakeWordSettingsStore: WakeWordSettingsStore? = null
+    private var conversationSessionSettingsStore: ConversationSessionSettingsStore? = null
     private var reminderScheduler: ReminderScheduler? = null
     private var reminderApiClient: ReminderApiClient? = null
     private var reminderManagerDialog: ReminderManagerDialog? = null
@@ -123,6 +124,12 @@ class MainActivity : Activity() {
         awakeGraceSession = null
         dispatchRobotEvent(RobotEvent.AwakeGraceElapsed(session))
     }
+    private var sessionTimeoutAnimationSession: Long? = null
+    private val sessionTimeoutAnimationFinished = Runnable {
+        val session = sessionTimeoutAnimationSession ?: return@Runnable
+        sessionTimeoutAnimationSession = null
+        dispatchRobotEvent(RobotEvent.SessionTimeoutFinished(session))
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -142,11 +149,13 @@ class MainActivity : Activity() {
         val reminders = ReminderStore(applicationContext)
         val reminderSettings = ReminderSettingsStore(applicationContext)
         val wakeWordSettings = WakeWordSettingsStore(applicationContext)
+        val conversationSessionSettings = ConversationSessionSettingsStore(applicationContext)
         val scheduler = ReminderScheduler(applicationContext, reminders)
         val reminderApi = ReminderApiClient(BuildConfig.COMPANION_BACKEND_URL, tokenStore::accessToken)
         reminderStore = reminders
         reminderSettingsStore = reminderSettings
         wakeWordSettingsStore = wakeWordSettings
+        conversationSessionSettingsStore = conversationSessionSettings
         reminderScheduler = scheduler
         reminderApiClient = reminderApi
         core.dispatch(RobotEvent.PersistentMemoryConsentChanged(consentStore.isEnabled()))
@@ -186,7 +195,8 @@ class MainActivity : Activity() {
             onAuthenticationRequired = { showSecuritySettings(authenticationRequired = true) },
             reminderCommandProcessor = reminderCommands,
             nativeAlarmCommandProcessor = NativeAlarmCommandProcessor(applicationContext),
-            localClockCommandProcessor = LocalClockCommandProcessor()
+            localClockCommandProcessor = LocalClockCommandProcessor(),
+            sessionTimeoutMillisProvider = conversationSessionSettings::timeoutMillis
         )
         face.setOnFaceTapListener { onFaceTapped() }
         face.setOnSleepRequestListener { dispatchRobotEvent(RobotEvent.SleepRequested) }
@@ -299,6 +309,7 @@ class MainActivity : Activity() {
         reminderStore = null
         reminderSettingsStore = null
         wakeWordSettingsStore = null
+        conversationSessionSettingsStore = null
         wakeWordEnabledCheckBox = null
         wakeWordStatusText = null
         mainHandler.removeCallbacksAndMessages(null)
@@ -349,6 +360,28 @@ class MainActivity : Activity() {
             text = "Uzun süreli hafızayı etkinleştir"
             isChecked = consentStore.isEnabled()
             contentDescription = "Uzun süreli hafızayı etkinleştir"
+        }
+        val sessionTimeoutStore = conversationSessionSettingsStore ?: return
+        val sessionTimeoutDetails = TextView(this).apply {
+            text = "Ayşe uyandırmasından sonra, seçilen süre boyunca tekrar Ayşe demeden konuşabilirsin. Bu sırada mikrofon sesi telefonda işlenir; kayıt veya arka plan ses yüklemesi yapılmaz."
+            setPadding(0, (12f * resources.displayMetrics.density).toInt(), 0, (4f * resources.displayMetrics.density).toInt())
+        }
+        val sessionTimeoutButton = Button(this).apply {
+            text = "SOHBET SÜRESİ: ${ConversationSessionPolicy.label(sessionTimeoutStore.timeoutSeconds())}"
+            setOnClickListener {
+                val options = ConversationSessionPolicy.timeoutOptionsSeconds
+                val selected = options.indexOf(sessionTimeoutStore.timeoutSeconds()).coerceAtLeast(0)
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("SOHBET OTURUMU")
+                    .setSingleChoiceItems(options.map(ConversationSessionPolicy::label).toTypedArray(), selected) { dialog, index ->
+                        val seconds = options[index]
+                        sessionTimeoutStore.setTimeoutSeconds(seconds)
+                        text = "SOHBET SÜRESİ: ${ConversationSessionPolicy.label(seconds)}"
+                        dialog.dismiss()
+                    }
+                    .setNegativeButton("KAPAT", null)
+                    .show()
+            }
         }
         val wakeWordDetails = TextView(this).apply {
             text = "Uyandırma sözcüğü: Ayşe. Açıkken mikrofon sesi yalnızca telefonda işlenir; ses kaydedilmez veya ağa gönderilmez. Yerel Türkçe model yaklaşık 35 MB'tır ve dinleme sırasında belleği artırabilir."
@@ -434,6 +467,8 @@ class MainActivity : Activity() {
         content.addView(details)
         content.addView(tokenInput)
         content.addView(memoryConsent)
+        content.addView(sessionTimeoutDetails)
+        content.addView(sessionTimeoutButton)
         content.addView(memoryDetails)
         content.addView(wakeWordDetails)
         content.addView(wakeWordToggle)
@@ -1094,6 +1129,10 @@ class MainActivity : Activity() {
             mainHandler.removeCallbacks(sleepAnimationFinished)
             pendingSleepAnimationSession = null
         }
+        if (current.activity != RobotActivityState.SESSION_TIMEOUT) {
+            mainHandler.removeCallbacks(sessionTimeoutAnimationFinished)
+            sessionTimeoutAnimationSession = null
+        }
 
         when (current.activity) {
             RobotActivityState.WAKING -> {
@@ -1104,7 +1143,15 @@ class MainActivity : Activity() {
             RobotActivityState.LISTENING,
             RobotActivityState.THINKING,
             RobotActivityState.SPEAKING,
+            RobotActivityState.INTERRUPTED,
+            RobotActivityState.FOLLOW_UP_LISTENING,
             RobotActivityState.PROACTIVE_SPEAKING -> mainHandler.removeCallbacks(dismissRobotError)
+
+            RobotActivityState.SESSION_TIMEOUT -> {
+                sessionTimeoutAnimationSession = current.sessionId
+                mainHandler.removeCallbacks(sessionTimeoutAnimationFinished)
+                mainHandler.postDelayed(sessionTimeoutAnimationFinished, 350L)
+            }
 
             RobotActivityState.ERROR -> {
                 faceView?.setCaption(null)
@@ -1133,6 +1180,8 @@ class MainActivity : Activity() {
                 RobotActivityState.LISTENING,
                 RobotActivityState.THINKING,
                 RobotActivityState.SPEAKING,
+                RobotActivityState.INTERRUPTED,
+                RobotActivityState.FOLLOW_UP_LISTENING,
                 RobotActivityState.PROACTIVE_SPEAKING
             )
         ) pauseWakeWordMonitoringForInteraction()

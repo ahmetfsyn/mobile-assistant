@@ -171,6 +171,67 @@ class RobotCoreTest {
     }
 
     @Test
+    fun continuousSessionKeepsSameSessionForFollowUpAndTimesOutToSleep() {
+        val core = readyCoreWithMicrophone()
+        val started = startListening(core)
+        core.dispatch(RobotEvent.TranscriptReady(started.sessionId, hasText = true))
+        core.dispatch(RobotEvent.ConversationReady(started.sessionId, hasReply = true))
+
+        core.dispatch(RobotEvent.SpeechCompleted(started.sessionId, continueConversation = true))
+        assertEquals(RobotActivityState.FOLLOW_UP_LISTENING, core.snapshot.activity)
+        assertEquals(started.sessionId, core.snapshot.sessionId)
+
+        core.dispatch(RobotEvent.FollowUpListeningStarted(started.sessionId))
+        assertEquals(RobotActivityState.LISTENING, core.snapshot.activity)
+        core.dispatch(RobotEvent.RecordingCompleted(started.sessionId))
+        core.dispatch(RobotEvent.TranscriptReady(started.sessionId, hasText = true))
+        assertEquals(RobotActivityState.THINKING, core.snapshot.activity)
+        core.dispatch(RobotEvent.ConversationReady(started.sessionId, hasReply = true))
+        core.dispatch(RobotEvent.SpeechCompleted(started.sessionId, continueConversation = true))
+
+        assertEquals(
+            listOf(RobotEffect.CancelVoiceSession(started.sessionId)),
+            core.dispatch(RobotEvent.ConversationSessionTimedOut(started.sessionId))
+        )
+        assertEquals(RobotActivityState.SESSION_TIMEOUT, core.snapshot.activity)
+        core.dispatch(RobotEvent.SessionTimeoutFinished(core.snapshot.sessionId))
+        assertEquals(RobotActivityState.RETURNING_TO_SLEEP, core.snapshot.activity)
+    }
+
+    @Test
+    fun followUpRecognitionFailureCanReturnFromThinkingToRetryState() {
+        val core = readyCoreWithMicrophone()
+        val started = startListening(core)
+        core.dispatch(RobotEvent.TranscriptReady(started.sessionId, hasText = true))
+        core.dispatch(RobotEvent.ConversationReady(started.sessionId, hasReply = true))
+        core.dispatch(RobotEvent.SpeechCompleted(started.sessionId, continueConversation = true))
+        core.dispatch(RobotEvent.FollowUpListeningStarted(started.sessionId))
+        core.dispatch(RobotEvent.RecordingCompleted(started.sessionId))
+        assertEquals(RobotActivityState.THINKING, core.snapshot.activity)
+
+        core.dispatch(RobotEvent.FollowUpListeningEnded(started.sessionId))
+        assertEquals(RobotActivityState.FOLLOW_UP_LISTENING, core.snapshot.activity)
+    }
+
+    @Test
+    fun bargeInInvalidatesThinkingOrSpeakingAndMovesIntoListening() {
+        val core = readyCoreWithMicrophone()
+        val started = startListening(core)
+        core.dispatch(RobotEvent.TranscriptReady(started.sessionId, hasText = true))
+        assertEquals(RobotActivityState.THINKING, core.snapshot.activity)
+
+        core.dispatch(RobotEvent.BargeInDetected(started.sessionId))
+        assertEquals(RobotActivityState.INTERRUPTED, core.snapshot.activity)
+        core.dispatch(RobotEvent.BargeInListeningStarted(started.sessionId))
+        assertEquals(RobotActivityState.LISTENING, core.snapshot.activity)
+
+        core.dispatch(RobotEvent.TranscriptReady(started.sessionId, hasText = true))
+        core.dispatch(RobotEvent.ConversationReady(started.sessionId, hasReply = true))
+        core.dispatch(RobotEvent.BargeInDetected(started.sessionId))
+        assertEquals(RobotActivityState.INTERRUPTED, core.snapshot.activity)
+    }
+
+    @Test
     fun tappingDuringThinkingCancelsOldSessionThenWakesIntoNewListeningSession() {
         val core = readyCoreWithMicrophone()
         val first = startListening(core)

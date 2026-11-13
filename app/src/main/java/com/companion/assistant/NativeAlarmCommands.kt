@@ -7,7 +7,16 @@ import android.util.Log
 import java.util.Calendar
 import java.util.Locale
 
-internal enum class LocalActionStatus { SUCCESS, NEEDS_CLARIFICATION, UNSUPPORTED, FAILED }
+internal enum class LocalActionStatus {
+    LOCAL_SUCCESS,
+    LOCAL_FAILURE,
+    NEEDS_CLARIFICATION,
+    UNSUPPORTED,
+    REMOTE_REQUIRED,
+    REMOTE_FAILURE,
+    /** Android accepted an intent, but its Clock implementation exposes no result to verify state. */
+    ACTION_DISPATCHED
+}
 internal data class LocalActionResult(
     val status: LocalActionStatus,
     val message: String,
@@ -16,7 +25,12 @@ internal data class LocalActionResult(
 
 internal sealed class NativeAlarmCommand {
     data class Create(val hour: Int, val minute: Int, val days: List<Int>, val tomorrow: Boolean) : NativeAlarmCommand()
+    data class RelativeCreate(val durationMinutes: Int) : NativeAlarmCommand()
     data object Show : NativeAlarmCommand()
+    data object DisableAll : NativeAlarmCommand()
+    data object DisableOne : NativeAlarmCommand()
+    data object DeleteOne : NativeAlarmCommand()
+    data object EditOne : NativeAlarmCommand()
     data object Dismiss : NativeAlarmCommand()
     data object Snooze : NativeAlarmCommand()
     data object Manage : NativeAlarmCommand()
@@ -48,12 +62,31 @@ internal object TurkishAlarmCommandParser {
 
     fun parse(raw: String): NativeAlarmCommand? {
         val text = normalize(raw)
-        if (!text.contains("alarm")) return null
-        if (text.contains("hangi alarm") || text.contains("alarmlar") || text.contains("alarm list")) return NativeAlarmCommand.Show
+        val asksForAlarm = "alarm" in text || "uyandır" in text || "uyandir" in text
+        if (!asksForAlarm) return null
+        relativeDurationMinutes(text)?.let { return NativeAlarmCommand.RelativeCreate(it) }
+        if (("aktif alarm" in text || "etkin alarm" in text) &&
+            ("kapat" in text || "devre dışı" in text || "devre disi" in text)) {
+            return NativeAlarmCommand.DisableAll
+        }
+        if ("devre dışı bırak" in text || "devre disi birak" in text) return NativeAlarmCommand.DisableOne
+        if ("sil" in text) return NativeAlarmCommand.DeleteOne
+        if ("değiştir" in text || "düzenle" in text) return NativeAlarmCommand.EditOne
+        if ("hangi alarm" in text || "alarmlar" in text || "alarm list" in text || "alarm listes" in text) {
+            return NativeAlarmCommand.Show
+        }
         if (text.contains("ertele")) return NativeAlarmCommand.Snooze
-        if (text.contains("kapat") || text.contains("sustur")) return NativeAlarmCommand.Dismiss
-        if (text.contains("sil") || text.contains("değiştir") || text.contains("düzenle") || text.contains("etkinleştir")) return NativeAlarmCommand.Manage
-        if (!text.contains("kur") && !text.contains("ayarla")) return NativeAlarmCommand.Show
+        if ((text.contains("kapat") || text.contains("sustur")) &&
+            (text.contains("çalan") || text.contains("calan") || text.contains("çalmakta") || text.contains("calmakta"))) {
+            return NativeAlarmCommand.Dismiss
+        }
+        if (text.contains("kapat") || text.contains("sustur")) {
+            return NativeAlarmCommand.Clarify("Çalan alarmı mı kapatmak istiyorsun, yoksa kayıtlı alarmları mı devre dışı bırakmak istiyorsun?")
+        }
+        if (text.contains("etkinleştir") || text.contains("etkinlestir")) return NativeAlarmCommand.Manage
+        if (!text.contains("kur") && !text.contains("ayarla") && !text.contains("çalsın") && !text.contains("calsin")) {
+            return NativeAlarmCommand.Manage
+        }
 
         val parsedTime = findNumericTime(text) ?: findSpokenTime(text)
             ?: return NativeAlarmCommand.Clarify("Alarmı hangi saate kurmamı istersin?")
@@ -83,6 +116,53 @@ internal object TurkishAlarmCommandParser {
         return NativeAlarmCommand.Create(hour, minute, days, text.contains("yarın"))
     }
 
+    fun parseCorrection(previousTranscript: String, correctionTranscript: String): NativeAlarmCommand? {
+        val previous = parse(previousTranscript) as? NativeAlarmCommand.Create ?: return null
+        val correction = normalize(correctionTranscript)
+        if (listOf("hayır", "hayir", "değil", "degil", "olsun", "yerine").none(correction::contains)) return null
+        if ("yarın" in correction || "yarin" in correction) return previous.copy(tomorrow = true)
+        if ("bugün" in correction || "bugun" in correction) return previous.copy(tomorrow = false)
+        val changed = findNumericTime(correction) ?: findSpokenTime(correction) ?: run {
+            val tokens = tokenPattern.findAll(correction).map { it.value }.toList()
+            val numberIndex = tokens.indices.lastOrNull { spokenNumberAt(tokens, it) != null } ?: return null
+            val (number, _) = spokenNumberAt(tokens, numberIndex) ?: return null
+            number to 0
+        }
+        val correctedHour = changed.first
+        if (correctedHour !in 0..23 || changed.second !in 0..59) return null
+        val isPeriodSpecified = "sabah" in correction || "öğleden önce" in correction ||
+            "akşam" in correction || "öğleden sonra" in correction || "gece" in correction
+        val hour = when {
+            correctedHour > 12 || correctedHour == 0 || isPeriodSpecified -> correctedHour
+            previous.hour >= 12 -> correctedHour + 12
+            else -> correctedHour
+        }
+        val minuteWasSpecified = hourPattern.find(correction)?.groupValues?.get(2)?.isNotEmpty() == true
+        val minute = if (minuteWasSpecified) changed.second else 0
+        return previous.copy(hour = hour, minute = minute, tomorrow = false)
+    }
+
+    private fun relativeDurationMinutes(text: String): Int? {
+        val tokens = tokenPattern.findAll(text).map { it.value }.toList()
+        for (unitIndex in tokens.indices) {
+            val unit = tokens[unitIndex]
+            if (unit !in setOf("dakika", "dk", "saat")) continue
+            if (tokens.getOrNull(unitIndex + 1) !in setOf("sonra", "sonrasına", "sonrasina")) continue
+            val duration = when {
+                unit == "saat" && tokens.getOrNull(unitIndex - 1) == "yarım" -> 30
+                unit == "saat" && tokens.getOrNull(unitIndex - 1) == "buçuk" -> {
+                    val base = spokenNumberAt(tokens, unitIndex - 2)?.first ?: return null
+                    base * 60 + 30
+                }
+                unit == "saat" -> (spokenNumberAt(tokens, unitIndex - 1)?.first ?: return null) * 60
+                else -> spokenNumberAt(tokens, unitIndex - 1)?.first ?: return null
+            }
+            if (duration !in 1..(24 * 60)) return null
+            return duration
+        }
+        return null
+    }
+
     private fun findNumericTime(text: String): Pair<Int, Int>? {
         val match = hourPattern.find(text) ?: return null
         val hour = match.groupValues[1].toIntOrNull() ?: return null
@@ -108,7 +188,9 @@ internal object TurkishAlarmCommandParser {
     }
 
     private fun spokenNumberAt(tokens: List<String>, index: Int): Pair<Int, Int>? {
-        val first = tokens.getOrNull(index)?.let(numberWords::get) ?: return null
+        val token = tokens.getOrNull(index) ?: return null
+        token.toIntOrNull()?.let { return it to 1 }
+        val first = numberWords[token] ?: return null
         if (first in setOf(20, 30, 40, 50)) {
             val unit = tokens.getOrNull(index + 1)?.let(unitWords::get)
             if (unit != null) return (first + unit) to 2
@@ -127,8 +209,15 @@ internal object NativeAlarmIntents {
 
     fun planFor(command: NativeAlarmCommand): Plan? = when (command) {
         is NativeAlarmCommand.Create -> Plan(AlarmClock.ACTION_SET_ALARM, command.hour, command.minute, command.days, true)
-        NativeAlarmCommand.Show, NativeAlarmCommand.Manage, NativeAlarmCommand.Dismiss -> Plan(AlarmClock.ACTION_SHOW_ALARMS)
+        NativeAlarmCommand.Show -> Plan(AlarmClock.ACTION_SHOW_ALARMS)
         NativeAlarmCommand.Snooze -> Plan(AlarmClock.ACTION_SNOOZE_ALARM)
+        is NativeAlarmCommand.RelativeCreate,
+        NativeAlarmCommand.Dismiss,
+        NativeAlarmCommand.DisableAll,
+        NativeAlarmCommand.DisableOne,
+        NativeAlarmCommand.DeleteOne,
+        NativeAlarmCommand.EditOne,
+        NativeAlarmCommand.Manage,
         is NativeAlarmCommand.Clarify -> null
     }
 
@@ -182,22 +271,52 @@ internal class NativeAlarmCommandProcessor(
 ) {
     constructor(context: Context) : this(AndroidNativeAlarmLauncher(context.applicationContext))
 
-    fun process(transcript: String, interactionId: String = "unknown"): LocalActionResult? {
-        val command = TurkishAlarmCommandParser.parse(transcript) ?: return null
+    fun process(
+        transcript: String,
+        interactionId: String = "unknown",
+        correctionContext: String? = null
+    ): LocalActionResult? {
+        val command = TurkishAlarmCommandParser.parse(transcript)
+            ?: correctionContext?.let { TurkishAlarmCommandParser.parseCorrection(it, transcript) }
+            ?: return null
         val safeTranscript = LocalCommandDiagnostics.safeTranscript(transcript)
         val normalized = LocalCommandDiagnostics.safeTranscript(TurkishAlarmCommandParser.normalize(transcript))
         diagnostics.info("local_command_candidate interactionId=$interactionId transcript=\"$safeTranscript\" normalized=\"$normalized\"")
         diagnostics.info("local_command_selected interactionId=$interactionId intent=${command.javaClass.simpleName}")
+        when (command) {
+            NativeAlarmCommand.DisableAll -> return unsupportedManagement(interactionId, "disable_all",
+                "Saat uygulaması etkin alarmları dışarıdan listeleme veya tümünü kapatma API'si sunmuyor. Hiçbir alarmın kapatıldığını doğrulayamam.")
+            NativeAlarmCommand.DisableOne -> return unsupportedManagement(interactionId, "disable_one",
+                "Saat uygulaması tek bir alarmı dışarıdan devre dışı bırakma API'si sunmuyor. Alarmı Saat uygulamasında kapatmalısın.")
+            NativeAlarmCommand.DeleteOne -> return unsupportedManagement(interactionId, "delete_one",
+                "Saat uygulaması bir alarmı dışarıdan silme API'si sunmuyor. Alarmı Saat uygulamasında silmelisin.")
+            NativeAlarmCommand.EditOne -> return unsupportedManagement(interactionId, "edit_one",
+                "Saat uygulaması bir alarmı dışarıdan düzenleme API'si sunmuyor. Alarmı Saat uygulamasında düzenlemelisin.")
+            NativeAlarmCommand.Manage -> return unsupportedManagement(interactionId, "manage",
+                "Saat uygulamasındaki alarmları okuyup yönetebileceğim bir sistem API'si yok.")
+            NativeAlarmCommand.Dismiss -> return unsupportedManagement(interactionId, "dismiss_current",
+                "Telefon hangi alarmın şu anda çaldığını doğrulamama izin vermiyor. Yanlışlıkla sıradaki alarmı kapatmamak için bunu Saat uygulamasında yapmalısın.")
+            else -> Unit
+        }
         if (command is NativeAlarmCommand.Clarify) {
             diagnostics.info("local_handler_called interactionId=$interactionId handler=alarm result=clarification")
             return LocalActionResult(LocalActionStatus.NEEDS_CLARIFICATION, command.message)
         }
-        if (command is NativeAlarmCommand.Create && command.tomorrow && command.days.isEmpty()) {
+        val isRelativeRequest = command is NativeAlarmCommand.RelativeCreate
+        val effectiveCommand = if (command is NativeAlarmCommand.RelativeCreate) {
+            val current = nowCalendar()
+            val target = RelativeAlarmCalculator.calculate(current.timeInMillis, command.durationMinutes, current.timeZone)
+                ?: return LocalActionResult(LocalActionStatus.LOCAL_FAILURE, "Alarm zamanı hesaplanamadı.")
+            diagnostics.info("relative_alarm_calculated interactionId=$interactionId duration_minutes=${command.durationMinutes} target_epoch_ms=${target.epochMillis} local_target=${target.localDateTime}")
+            NativeAlarmCommand.Create(target.hour, target.minute, emptyList(), tomorrow = false)
+        } else command
+
+        if (effectiveCommand is NativeAlarmCommand.Create && effectiveCommand.tomorrow && effectiveCommand.days.isEmpty()) {
             val now = nowCalendar()
             val target = nowCalendar().apply {
                 timeInMillis = now.timeInMillis
-                set(Calendar.HOUR_OF_DAY, command.hour)
-                set(Calendar.MINUTE, command.minute)
+                set(Calendar.HOUR_OF_DAY, effectiveCommand.hour)
+                set(Calendar.MINUTE, effectiveCommand.minute)
                 set(Calendar.SECOND, 0)
                 set(Calendar.MILLISECOND, 0)
             }
@@ -207,44 +326,40 @@ internal class NativeAlarmCommandProcessor(
                     "Saat uygulaması yarın için tarihi doğrudan seçemiyor. Yanlışlıkla bugüne kurmamak için Saat uygulamasında yarını seçmelisin.")
             }
         }
-        if (command is NativeAlarmCommand.Create) {
-            diagnostics.info("local_handler_called interactionId=$interactionId handler=alarm action=create hour=${command.hour} minute=${command.minute} days=${command.days.size} tomorrow=${command.tomorrow}")
+        if (effectiveCommand is NativeAlarmCommand.Create) {
+            diagnostics.info("local_handler_called interactionId=$interactionId handler=alarm action=create hour=${effectiveCommand.hour} minute=${effectiveCommand.minute} days=${effectiveCommand.days.size} tomorrow=${effectiveCommand.tomorrow}")
         } else {
-            diagnostics.info("local_handler_called interactionId=$interactionId handler=alarm action=${command.javaClass.simpleName}")
+            diagnostics.info("local_handler_called interactionId=$interactionId handler=alarm action=${effectiveCommand.javaClass.simpleName}")
         }
-        val plan = NativeAlarmIntents.planFor(command)
-            ?: return LocalActionResult(LocalActionStatus.FAILED, "Alarm isteği hazırlanamadı.")
+        val plan = NativeAlarmIntents.planFor(effectiveCommand)
+            ?: return LocalActionResult(LocalActionStatus.LOCAL_FAILURE, "Alarm isteği hazırlanamadı.")
         val target = try {
             launcher.resolve(plan)
         } catch (error: RuntimeException) {
             diagnostics.warning("alarm_intent_resolution_failed interactionId=$interactionId action=${plan.action} type=${error.javaClass.simpleName}")
-            return LocalActionResult(LocalActionStatus.FAILED, "Saat uygulaması alarm isteğini denetleyemedi.")
+            return LocalActionResult(LocalActionStatus.LOCAL_FAILURE, "Saat uygulaması alarm isteğini denetleyemedi.")
         }
         if (target == null) {
             diagnostics.warning("alarm_intent_unhandled interactionId=$interactionId action=${plan.action}")
             return LocalActionResult(LocalActionStatus.UNSUPPORTED, "Bu telefonda bu alarm işlemini destekleyen bir Saat uygulaması bulamadım.")
         }
-        diagnostics.info("alarm_intent_constructed interactionId=$interactionId action=${plan.action} target=$target hour=${commandHour(command)} minute=${commandMinute(command)}")
-        if (command == NativeAlarmCommand.Show || command == NativeAlarmCommand.Manage || command == NativeAlarmCommand.Dismiss) {
-            val explanation = if (command == NativeAlarmCommand.Dismiss)
-                "Hangi alarmın çaldığını uygulamadan doğrulayamıyorum. Saat ekranında kapatacağın alarmı seç."
-            else "Saat uygulamasındaki alarmları açıyorum. Değiştirmek istediğin alarmı orada seç."
-            return LocalActionResult(if (command == NativeAlarmCommand.Dismiss) LocalActionStatus.UNSUPPORTED else LocalActionStatus.SUCCESS,
-                explanation, afterSpeech = { launchAfterSpeech(plan, interactionId, target) })
+        diagnostics.info("alarm_intent_constructed interactionId=$interactionId action=${plan.action} target=$target hour=${commandHour(effectiveCommand)} minute=${commandMinute(effectiveCommand)}")
+        if (effectiveCommand == NativeAlarmCommand.Show) {
+            return LocalActionResult(LocalActionStatus.ACTION_DISPATCHED,
+                "Saat uygulamasını açıyorum. Alarmları uygulama içinde görüntüleyebilirsin.",
+                afterSpeech = { launchAfterSpeech(plan, interactionId, target) })
         }
-        return when (command) {
+        return when (effectiveCommand) {
             is NativeAlarmCommand.Create -> {
-                val displayTime = String.format(Locale("tr", "TR"), "%02d.%02d", command.hour, command.minute)
-                LocalActionResult(LocalActionStatus.SUCCESS,
-                    "Saat uygulamasında $displayTime alarmını kurma isteğini gönderiyorum. Açıldığında alarmı doğrulayabilirsin.",
+                val displayTime = String.format(Locale("tr", "TR"), "%02d.%02d", effectiveCommand.hour, effectiveCommand.minute)
+                LocalActionResult(LocalActionStatus.ACTION_DISPATCHED,
+                    "Saat uygulamasına ${if (isRelativeRequest) "yaklaşık " else ""}$displayTime için alarm kurma isteğini gönderiyorum. Eklendiğini uygulamada doğrula.",
                     afterSpeech = { launchAfterSpeech(plan, interactionId, target) })
             }
-            NativeAlarmCommand.Snooze -> LocalActionResult(LocalActionStatus.SUCCESS,
-                "Çalan alarm varsa erteleme isteğini Saat uygulamasına iletiyorum.",
+            NativeAlarmCommand.Snooze -> LocalActionResult(LocalActionStatus.ACTION_DISPATCHED,
+                "Saat uygulamasına erteleme isteğini iletiyorum; çalan alarmın ertelendiğini buradan doğrulayamıyorum.",
                 afterSpeech = { launchAfterSpeech(plan, interactionId, target) })
-            else -> LocalActionResult(LocalActionStatus.SUCCESS,
-                "Saat uygulamasındaki alarmları açıyorum. Değiştirmek istediğin alarmı orada seç.",
-                afterSpeech = { launchAfterSpeech(plan, interactionId, target) })
+            else -> LocalActionResult(LocalActionStatus.LOCAL_FAILURE, "Alarm isteği hazırlanamadı.")
         }
     }
 
@@ -259,4 +374,35 @@ internal class NativeAlarmCommandProcessor(
 
     private fun commandHour(command: NativeAlarmCommand): Int? = (command as? NativeAlarmCommand.Create)?.hour
     private fun commandMinute(command: NativeAlarmCommand): Int? = (command as? NativeAlarmCommand.Create)?.minute
+
+    private fun unsupportedManagement(interactionId: String, operation: String, message: String): LocalActionResult {
+        diagnostics.warning("alarm_management_unsupported interactionId=$interactionId operation=$operation result_unverified=true")
+        return LocalActionResult(LocalActionStatus.UNSUPPORTED, message)
+    }
+}
+
+internal data class RelativeAlarmTarget(
+    val epochMillis: Long,
+    val localDateTime: String,
+    val hour: Int,
+    val minute: Int
+)
+
+internal object RelativeAlarmCalculator {
+    fun calculate(nowMillis: Long, durationMinutes: Int, timeZone: java.util.TimeZone): RelativeAlarmTarget? {
+        if (durationMinutes !in 1..(24 * 60)) return null
+        val exactTargetMillis = nowMillis + durationMinutes * 60_000L
+        // AlarmClock accepts hour/minute only. Round up so second precision never makes it ring early.
+        val targetMillis = ((exactTargetMillis + 59_999L) / 60_000L) * 60_000L
+        val target = Calendar.getInstance(timeZone, Locale("tr", "TR")).apply { timeInMillis = targetMillis }
+        val dateTime = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", Locale("tr", "TR")).apply {
+            this.timeZone = timeZone
+        }.format(target.time)
+        return RelativeAlarmTarget(
+            epochMillis = targetMillis,
+            localDateTime = dateTime,
+            hour = target.get(Calendar.HOUR_OF_DAY),
+            minute = target.get(Calendar.MINUTE)
+        )
+    }
 }

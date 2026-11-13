@@ -18,6 +18,7 @@ internal interface SpeechInput : Closeable {
         fun onError(sessionId: Long, message: String)
         fun onSpeechStarted(sessionId: Long) = Unit
         fun onSpeechEnded(sessionId: Long) = Unit
+        fun onPartialTranscript(sessionId: Long, transcript: String) = Unit
     }
 
     fun startListening(sessionId: Long, language: VoiceLanguage, callback: Callback)
@@ -130,6 +131,7 @@ internal interface SpeechRecognitionEngine {
         fun onBeginningOfSpeech()
         fun onEndOfSpeech()
         fun onResults(transcript: String)
+        fun onPartialResults(transcript: String) = Unit
         fun onError(errorCode: Int)
     }
 
@@ -275,6 +277,11 @@ internal class PlatformSpeechInput(
                     request.callback.onSpeechEnded(request.sessionId)
                 }
 
+                override fun onPartialResults(transcript: String) = dispatchForAttempt(attempt) {
+                    val normalized = transcript.trim()
+                    if (normalized.isNotEmpty()) request.callback.onPartialTranscript(request.sessionId, normalized)
+                }
+
                 override fun onResults(transcript: String) = dispatchForAttempt(attempt) {
                     val normalized = transcript.trim()
                     if (normalized.isEmpty()) {
@@ -417,7 +424,13 @@ private class AndroidSpeechRecognitionEngine(
             override fun onRmsChanged(rmsdB: Float) = Unit
             override fun onBufferReceived(buffer: ByteArray?) = Unit
             override fun onEndOfSpeech() = listener.onEndOfSpeech()
-            override fun onPartialResults(partialResults: Bundle?) = Unit
+            override fun onPartialResults(partialResults: Bundle?) {
+                val transcript = partialResults
+                    ?.getStringArrayList(android.speech.SpeechRecognizer.RESULTS_RECOGNITION)
+                    ?.firstOrNull()
+                    .orEmpty()
+                listener.onPartialResults(transcript)
+            }
             override fun onEvent(eventType: Int, params: Bundle?) = Unit
 
             override fun onResults(results: Bundle?) {
@@ -436,7 +449,7 @@ private class AndroidSpeechRecognitionEngine(
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, language.tag)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, language.tag)
             putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, preferOffline)
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
         }
         recognizer.startListening(intent)

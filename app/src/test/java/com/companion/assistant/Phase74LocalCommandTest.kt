@@ -29,7 +29,7 @@ class Phase74LocalCommandTest {
         assertEquals(15, plan.minute)
         assertEquals(listOf(Calendar.MONDAY, Calendar.FRIDAY), plan.days)
         assertTrue(plan.skipUi)
-        assertEquals(AlarmClock.ACTION_SHOW_ALARMS, NativeAlarmIntents.planFor(NativeAlarmCommand.Dismiss)?.action)
+        assertEquals(null, NativeAlarmIntents.planFor(NativeAlarmCommand.Dismiss))
         assertEquals(AlarmClock.ACTION_SNOOZE_ALARM, NativeAlarmIntents.planFor(NativeAlarmCommand.Snooze)?.action)
     }
 

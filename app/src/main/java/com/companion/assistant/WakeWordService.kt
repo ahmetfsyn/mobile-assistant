@@ -21,6 +21,7 @@ import android.util.Log
 import org.json.JSONObject
 import org.vosk.Model
 import org.vosk.Recognizer
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.ExecutorService
@@ -331,17 +332,18 @@ internal class WakeWordModelInstaller(private val context: Context) {
     }
 }
 
-/** Local Turkish recognizer. Complete utterances beginning with Ayşe can be handed to the app. */
+/** Grammar-constrained local wake decoder with a one-shot full-utterance command handoff. */
 internal class VoskWakeWordEngine(modelDirectory: File) : WakeWordEngine {
     private val model: Model
-    private val recognizer: Recognizer
+    private val wakeRecognizer: Recognizer
     private val closed = AtomicBoolean(false)
+    private val utteranceAudio = WipingAudioBuffer(MAX_UTTERANCE_BYTES)
 
     init {
         val loadedModel = Model(modelDirectory.absolutePath)
         model = loadedModel
-        recognizer = try {
-            Recognizer(loadedModel, WakeWordMonitor.SAMPLE_RATE_HZ.toFloat()).apply {
+        wakeRecognizer = try {
+            Recognizer(loadedModel, WakeWordMonitor.SAMPLE_RATE_HZ.toFloat(), WAKE_GRAMMAR).apply {
                 setWords(true)
             }
         } catch (error: Throwable) {
@@ -352,21 +354,78 @@ internal class VoskWakeWordEngine(modelDirectory: File) : WakeWordEngine {
 
     override fun acceptAudio(pcm16le: ByteArray, length: Int): String? {
         if (closed.get() || length <= 0 || length > pcm16le.size) return null
-        if (!recognizer.acceptWaveForm(pcm16le, length)) return null
-        val result = JSONObject(recognizer.result)
-        val text = result.optString("text").trim()
+        if (utteranceAudio.size() + length > MAX_UTTERANCE_BYTES) {
+            utteranceAudio.erase()
+            Log.w(TAG, "wake_utterance_buffer_cleared reason=duration_limit")
+        }
+        utteranceAudio.write(pcm16le, length)
+        if (!wakeRecognizer.acceptWaveForm(pcm16le, length)) return null
+
+        val result = JSONObject(wakeRecognizer.result)
+        val wakeText = result.optString("text").trim()
         val confidence = result.optJSONArray("result")?.optJSONObject(0)?.optDouble("conf", 0.0) ?: 0.0
-        if (WakeWordMatcher.match(text) == null || confidence < MIN_CONFIDENCE) return null
-        return text
+        if (WakeWordMatcher.match(wakeText) == null || confidence < MIN_CONFIDENCE) {
+            if (WakeWordMatcher.match(wakeText) != null) {
+                Log.i(TAG, "wake_candidate_rejected confidence=$confidence")
+            }
+            utteranceAudio.erase()
+            return null
+        }
+
+        val audio = utteranceAudio.toByteArray()
+        utteranceAudio.erase()
+        val commandTranscript = try {
+            decodeCommandFromSameUtterance(audio)
+        } finally {
+            audio.fill(0)
+        }
+        Log.i(TAG, "wake_candidate_accepted confidence=$confidence command_handoff=${!commandTranscript.isNullOrBlank()}")
+        return commandTranscript ?: "Ayşe"
     }
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
-        try { recognizer.close() } finally { model.close() }
+        utteranceAudio.erase()
+        try { wakeRecognizer.close() } finally { model.close() }
+    }
+
+    private fun decodeCommandFromSameUtterance(audio: ByteArray): String? {
+        if (audio.isEmpty()) return null
+        val decoder = Recognizer(model, WakeWordMonitor.SAMPLE_RATE_HZ.toFloat()).apply { setWords(true) }
+        return try {
+            val ended = decoder.acceptWaveForm(audio, audio.size)
+            val resultText = if (ended) {
+                JSONObject(decoder.result).optString("text").trim()
+            } else {
+                JSONObject(decoder.finalResult).optString("text").trim()
+            }
+            val match = WakeWordMatcher.match(resultText) ?: return null
+            if (match.commandTranscript?.contains("[unk]") == true) null else resultText
+        } catch (error: RuntimeException) {
+            Log.w(TAG, "wake_command_handoff_failed type=${error.javaClass.simpleName}")
+            null
+        } finally {
+            decoder.close()
+        }
     }
 
     private companion object {
+        const val TAG = "WakeWordService"
+        const val WAKE_GRAMMAR = "[\"ayşe\",\"aylin\",\"ayşegül\",\"ayşe'nin\",\"[unk]\"]"
         const val MIN_CONFIDENCE = 0.75
+        const val MAX_UTTERANCE_BYTES = WakeWordMonitor.SAMPLE_RATE_HZ * 2 * 15
+    }
+
+    private class WipingAudioBuffer(private val maxBytes: Int) : ByteArrayOutputStream() {
+        fun write(source: ByteArray, length: Int) {
+            val acceptedLength = length.coerceAtMost(maxBytes)
+            write(source, 0, acceptedLength)
+        }
+
+        fun erase() {
+            buf.fill(0)
+            reset()
+        }
     }
 }
 

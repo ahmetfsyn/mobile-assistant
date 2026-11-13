@@ -25,7 +25,10 @@ internal class VoiceInteractionController(
     private val onAuthenticationRequired: () -> Unit = {},
     private val reminderCommandProcessor: ReminderCommandProcessor? = null,
     private val nativeAlarmCommandProcessor: NativeAlarmCommandProcessor? = null,
-    private val localClockCommandProcessor: LocalClockCommandProcessor? = null
+    private val localClockCommandProcessor: LocalClockCommandProcessor? = null,
+    private val sessionTimeoutMillisProvider: () -> Long = {
+        ConversationSessionPolicy.timeoutMillis(ConversationSessionPolicy.DEFAULT_TIMEOUT_SECONDS)
+    }
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val recognitionExecutor: ExecutorService = Executors.newSingleThreadExecutor { task ->
@@ -43,6 +46,18 @@ internal class VoiceInteractionController(
     private var recognitionTask: Future<*>? = null
     private var activeRecording: AudioRecording? = null
     private var noCommandTimeout: Runnable? = null
+    private var conversationSessionTimeout: Runnable? = null
+    private var followUpRetry: Runnable? = null
+    private var conversationSessionId: Long? = null
+    private var listeningForFollowUp = false
+    private var bargeInMonitorId: String? = null
+    private var bargeInTriggeredId: String? = null
+    private var bargeInMicrophoneLease: MicrophoneOwnership.Lease? = null
+    private var bargeInSpeechStartedAtMs = 0L
+    private var currentSpokenResponse: String? = null
+    private var currentUserTranscript: String? = null
+    private var pendingCorrectionContext: String? = null
+    private var bargeInRetry: Runnable? = null
     private val emotionReducer = EmotionReducer()
     private var emotionState = EmotionState.CALM
     private val emotionDecayRunnable = Runnable {
@@ -58,13 +73,30 @@ internal class VoiceInteractionController(
             return
         }
         if (closed || !robotCore.isCurrent(sessionId, RobotActivityState.LISTENING)) return
+        beginListening(sessionId, followUp = false)
+    }
+
+    private fun startFollowUpListening(sessionId: Long) {
+        if (closed || !robotCore.isCurrent(sessionId, RobotActivityState.FOLLOW_UP_LISTENING)) return
+        robotCore.dispatch(RobotEvent.FollowUpListeningStarted(sessionId))
+        if (robotCore.isCurrent(sessionId, RobotActivityState.LISTENING)) beginListening(sessionId, followUp = true)
+    }
+
+    private fun beginListening(sessionId: Long, followUp: Boolean) {
+        if (closed || !robotCore.isCurrent(sessionId, RobotActivityState.LISTENING)) return
+        if (conversationSessionId != sessionId) {
+            currentUserTranscript = null
+            pendingCorrectionContext = null
+        }
         activeSessionId = sessionId
+        conversationSessionId = sessionId
         recognitionStartedAtMs = SystemClock.elapsedRealtime()
         speechEndedAtMs = 0L
         requestStartedAtMs = 0L
         replyReadyAtMs = 0L
+        listeningForFollowUp = followUp
         cancelNoCommandTimeout()
-        mainHandler.removeCallbacks(emotionDecayRunnable)
+        if (!followUp) mainHandler.removeCallbacks(emotionDecayRunnable)
         val interactionId = UUID.randomUUID().toString()
         activeInteractionId = interactionId
         applyEmotionEvent(EmotionEvent.INTERACTION_STARTED)
@@ -74,18 +106,20 @@ internal class VoiceInteractionController(
 
         val microphoneLease = MicrophoneOwnership.acquire(MicrophoneOwnership.Owner.PUSH_TO_TALK)
         if (microphoneLease == null) {
-            reportFailure(sessionId, "MIKROFON BAŞKA BİR İŞLEM TARAFINDAN KULLANILIYOR")
+            if (followUp) recoverFollowUpListening(sessionId, interactionId, "microphone_busy")
+            else reportFailure(sessionId, "MİKROFON BAŞKA BİR İŞLEM TARAFINDAN KULLANILIYOR")
             return
         }
         activeMicrophoneLease = microphoneLease
-        scheduleNoCommandTimeout(sessionId, interactionId)
+        if (!followUp) scheduleNoCommandTimeout(sessionId, interactionId)
 
         try {
             speechInput.startListening(sessionId, language, object : SpeechInput.Callback {
                 override fun onSpeechStarted(sessionId: Long) = dispatchOnMain {
                     if (activeSessionId != sessionId || activeInteractionId != interactionId) return@dispatchOnMain
                     cancelNoCommandTimeout()
-                    Log.i(TAG, "command_speech_started interactionId=$interactionId session=$sessionId after_listen_ms=${SystemClock.elapsedRealtime() - recognitionStartedAtMs}")
+                    if (followUp) scheduleConversationSessionTimeout(sessionId)
+                    Log.i(TAG, "command_speech_started interactionId=$interactionId session=$sessionId follow_up=$followUp after_listen_ms=${SystemClock.elapsedRealtime() - recognitionStartedAtMs}")
                 }
 
                 override fun onSpeechEnded(sessionId: Long) = dispatchOnMain {
@@ -99,6 +133,7 @@ internal class VoiceInteractionController(
                     releaseMicrophoneLease(microphoneLease)
                     dispatchOnMain {
                         cancelNoCommandTimeout()
+                        cancelConversationSessionTimeout()
                         onRecordingReady(sessionId, language, interactionId, recording)
                     }
                 }
@@ -107,6 +142,7 @@ internal class VoiceInteractionController(
                     releaseMicrophoneLease(microphoneLease)
                     dispatchOnMain {
                         cancelNoCommandTimeout()
+                        cancelConversationSessionTimeout()
                         onTranscriptReady(sessionId, language, interactionId, transcript)
                     }
                 }
@@ -116,14 +152,16 @@ internal class VoiceInteractionController(
                     dispatchOnMain {
                         cancelNoCommandTimeout()
                         Log.w(TAG, "recognition_failed interactionId=$interactionId session=$sessionId")
-                        reportFailure(sessionId, message)
+                        if (followUp) recoverFollowUpListening(sessionId, interactionId, "recognition_error")
+                        else reportFailure(sessionId, message)
                     }
                 }
             })
         } catch (error: Exception) {
             releaseMicrophoneLease(microphoneLease)
             Log.w(TAG, "Ses tanıma başlatılamadı: tür=${error.javaClass.simpleName}")
-            reportFailure(sessionId, "KONUŞMA TANIMA SERVİSİ BAŞLATILAMADI")
+            if (followUp) recoverFollowUpListening(sessionId, interactionId, "start_failed")
+            else reportFailure(sessionId, "KONUŞMA TANIMA SERVİSİ BAŞLATILAMADI")
         }
     }
 
@@ -134,7 +172,13 @@ internal class VoiceInteractionController(
             return
         }
         if (closed || transcript.isBlank() || !robotCore.isCurrent(sessionId, RobotActivityState.LISTENING)) return
+        if (conversationSessionId != sessionId) {
+            currentUserTranscript = null
+            pendingCorrectionContext = null
+        }
         activeSessionId = sessionId
+        conversationSessionId = sessionId
+        listeningForFollowUp = false
         recognitionStartedAtMs = SystemClock.elapsedRealtime()
         speechEndedAtMs = recognitionStartedAtMs
         requestStartedAtMs = 0L
@@ -158,6 +202,9 @@ internal class VoiceInteractionController(
         }
         if (activeSessionId != sessionId) return
         cancelNoCommandTimeout()
+        cancelConversationSessionTimeout()
+        cancelFollowUpRetry()
+        cancelBargeInMonitor("session_cancelled")
         Log.i(TAG, "interaction_cancelled interactionId=${activeInteractionId ?: "unknown"} session=$sessionId")
         speechInput.cancel()
         releaseActiveMicrophoneLease()
@@ -169,6 +216,11 @@ internal class VoiceInteractionController(
         speechOutput.stop()
         activeSessionId = null
         activeInteractionId = null
+        conversationSessionId = null
+        currentSpokenResponse = null
+        currentUserTranscript = null
+        pendingCorrectionContext = null
+        listeningForFollowUp = false
         onCaptionChanged(null)
     }
 
@@ -191,6 +243,9 @@ internal class VoiceInteractionController(
         val interactionId = UUID.randomUUID().toString()
         activeSessionId = session
         activeInteractionId = interactionId
+        currentUserTranscript = null
+        pendingCorrectionContext = null
+        currentSpokenResponse = message
         speechOutput.speak(
             message,
             VoiceLanguage.TURKISH,
@@ -198,12 +253,15 @@ internal class VoiceInteractionController(
             object : SpeechOutput.Callback {
                 override fun onStarted() {
                     Log.i(TAG, "proactive_tts_started interactionId=$interactionId session=$session")
+                    armBargeInMonitor(session, interactionId, VoiceLanguage.TURKISH)
                 }
 
                 override fun onCompleted() = dispatchOnMain {
                     if (closed || activeSessionId != session || activeInteractionId != interactionId) return@dispatchOnMain
+                    cancelBargeInMonitor("proactive_tts_completed")
                     activeSessionId = null
                     activeInteractionId = null
+                    currentSpokenResponse = null
                     robotCore.dispatch(RobotEvent.ProactiveReminderFinished(session))
                     Log.i(TAG, "proactive_tts_completed interactionId=$interactionId session=$session")
                     onFinished(true)
@@ -211,8 +269,10 @@ internal class VoiceInteractionController(
 
                 override fun onError(message: String) = dispatchOnMain {
                     if (closed || activeSessionId != session || activeInteractionId != interactionId) return@dispatchOnMain
+                    cancelBargeInMonitor("proactive_tts_failed")
                     activeSessionId = null
                     activeInteractionId = null
+                    currentSpokenResponse = null
                     robotCore.dispatch(RobotEvent.ProactiveReminderFailed(session))
                     Log.w(TAG, "proactive_tts_failed interactionId=$interactionId session=$session reason=${message.take(64)}")
                     onFinished(false)
@@ -225,6 +285,9 @@ internal class VoiceInteractionController(
         if (closed) return
         closed = true
         cancelNoCommandTimeout()
+        cancelConversationSessionTimeout()
+        cancelFollowUpRetry()
+        cancelBargeInRetry()
         mainHandler.removeCallbacks(emotionDecayRunnable)
         activeSessionId?.let(::cancelSessionOnClose)
         speechInput.close()
@@ -247,10 +310,12 @@ internal class VoiceInteractionController(
         }
         Log.i(TAG, "recording_completed interactionId=$interactionId session=$session")
         robotCore.dispatch(RobotEvent.RecordingCompleted(session))
+        armBargeInMonitor(session, interactionId, language)
         val recognizer = recordedSpeechRecognizer
         if (recognizer == null) {
             recording.close()
-            reportFailure(session, "KONUŞMA TANIMA YAPILANDIRMASI HATALI")
+            if (listeningForFollowUp) recoverFollowUpListening(session, interactionId, "recognizer_unavailable")
+            else reportFailure(session, "KONUŞMA TANIMA YAPILANDIRMASI HATALI")
             return
         }
 
@@ -273,7 +338,10 @@ internal class VoiceInteractionController(
                     activeRecording = null
                     recognitionTask = null
                     val error = failure
-                    if (error != null) reportFailure(session, error)
+                    if (error != null) {
+                        if (listeningForFollowUp) recoverFollowUpListening(session, interactionId, "stt_failed")
+                        else reportFailure(session, error)
+                    }
                     else onTranscriptReady(session, language, interactionId, transcript.orEmpty())
                 }
             }
@@ -299,6 +367,10 @@ internal class VoiceInteractionController(
         ) return
 
         val transcript = rawTranscript.trim()
+        if (transcript.isEmpty() && listeningForFollowUp) {
+            recoverFollowUpListening(session, interactionId, "empty_transcript")
+            return
+        }
         val recognitionCompletedAt = SystemClock.elapsedRealtime()
         Log.i(TAG, "recognition_timing interactionId=$interactionId session=$session " +
             "since_listen_ms=${recognitionCompletedAt - recognitionStartedAtMs} " +
@@ -318,8 +390,14 @@ internal class VoiceInteractionController(
             return
         }
         if (!robotCore.isCurrent(session, RobotActivityState.THINKING)) return
+        val correctionContext = pendingCorrectionContext
+        pendingCorrectionContext = null
+        currentUserTranscript = transcript
+        listeningForFollowUp = false
+        cancelConversationSessionTimeout()
         applyEmotionEvent(EmotionEvent.TRANSCRIPT_RECEIVED)
         onCaptionChanged(transcript)
+        armBargeInMonitor(session, interactionId, language)
 
         Log.i(
             TAG,
@@ -333,11 +411,16 @@ internal class VoiceInteractionController(
                 var afterSpeech: (() -> String?)? = null
                 var failure: String? = null
                 var authenticationRequired = false
+                var selectedRoute = LocalCommandRoute.CONVERSATION_BACKEND
                 try {
                     if (closed || activeInteractionId != interactionId ||
                         !robotCore.isCurrent(session, RobotActivityState.THINKING)
                     ) return@submit
-                    val priorMessages = conversationHistory.recentMessages()
+                    val priorMessages = conversationHistory.recentMessages().toMutableList().apply {
+                        correctionContext?.takeIf { context ->
+                            none { it.role == "user" && it.content == context }
+                        }?.let { add(ConversationMessage("user", it)) }
+                    }.takeLast(8)
                     requestStartedAtMs = SystemClock.elapsedRealtime()
                     Log.i(
                         TAG,
@@ -345,24 +428,25 @@ internal class VoiceInteractionController(
                             "messageFingerprint=${VoiceDiagnostics.fingerprint(interactionId, transcript)} " +
                             "historyCount=${priorMessages.size}"
                     )
-                    val localAlarmReply = nativeAlarmCommandProcessor?.process(transcript, interactionId)
+                    val localAlarmReply = nativeAlarmCommandProcessor?.process(transcript, interactionId, correctionContext)
                     val localClockReply = if (localAlarmReply == null) {
-                        localClockCommandProcessor?.process(transcript, interactionId)
+                        localClockCommandProcessor?.process(transcript, interactionId, correctionContext)
                     } else null
                     afterSpeech = localAlarmReply?.afterSpeech
                     val localReminderReply = if (localAlarmReply == null && localClockReply == null) {
                         reminderCommandProcessor?.process(transcript)
                     } else null
-                    val route = LocalCommandRouteSelector.select(localAlarmReply, localClockReply, localReminderReply)
-                    Log.i(TAG, "local_command_route_selected interactionId=$interactionId route=${route.name.lowercase(Locale.US)} " +
-                        "handler_reached=${route != LocalCommandRoute.CONVERSATION_BACKEND}")
-                    val generatedReply = when {
-                        localAlarmReply != null -> ConversationReply(localAlarmReply.message)
-                        localClockReply != null -> ConversationReply(localClockReply.message)
-                        localReminderReply != null -> ConversationReply(localReminderReply)
-                        else -> conversationEngine.respond(transcript, language, priorMessages, interactionId)
+                    val dispatch = LocalCommandDispatcher.dispatch(localAlarmReply, localClockReply, localReminderReply)
+                    selectedRoute = dispatch.route
+                    Log.i(TAG, "local_command_route_selected interactionId=$interactionId route=${dispatch.route.name.lowercase(Locale.US)} " +
+                        "status=${dispatch.result.status.name.lowercase(Locale.US)} " +
+                        "handler_reached=${dispatch.result.status != LocalActionStatus.REMOTE_REQUIRED}")
+                    val generatedReply = if (dispatch.result.status == LocalActionStatus.REMOTE_REQUIRED) {
+                        Log.i(TAG, "conversation_backend_call interactionId=$interactionId execution_status=remote_required")
+                        conversationEngine.respond(transcript, language, priorMessages, interactionId)
+                    } else {
+                        ConversationReply(dispatch.result.message)
                     }
-                    if (route == LocalCommandRoute.CONVERSATION_BACKEND) Log.i(TAG, "conversation_backend_call interactionId=$interactionId")
                     if (generatedReply.text.isNotBlank()) reply = generatedReply
                     else failure = "BULUT ASİSTANI BOŞ YANIT VERDİ"
                 } catch (error: Exception) {
@@ -372,6 +456,7 @@ internal class VoiceInteractionController(
                         Log.w(
                             TAG,
                             "conversation_failed interactionId=$interactionId session=$session " +
+                                "execution_status=${if (selectedRoute == LocalCommandRoute.CONVERSATION_BACKEND) LocalActionStatus.REMOTE_FAILURE else LocalActionStatus.LOCAL_FAILURE} " +
                                 "type=${error.javaClass.simpleName} cause=${error.cause?.javaClass?.simpleName ?: "none"}"
                         )
                     }
@@ -417,12 +502,170 @@ internal class VoiceInteractionController(
         }
     }
 
+    private fun armBargeInMonitor(session: Long, parentInteractionId: String, language: VoiceLanguage) {
+        if (closed || bargeInMonitorId != null || activeSessionId != session ||
+            robotCore.snapshot.activity !in setOf(
+                RobotActivityState.THINKING,
+                RobotActivityState.SPEAKING,
+                RobotActivityState.PROACTIVE_SPEAKING
+            )
+        ) return
+        val lease = MicrophoneOwnership.acquire(MicrophoneOwnership.Owner.BARGE_IN)
+        if (lease == null) {
+            Log.i(TAG, "barge_in_unavailable session=$session microphone_owner=${MicrophoneOwnership.currentOwner()}")
+            return
+        }
+        val monitorId = UUID.randomUUID().toString()
+        bargeInMonitorId = monitorId
+        bargeInTriggeredId = null
+        bargeInMicrophoneLease = lease
+        bargeInSpeechStartedAtMs = 0L
+        Log.i(TAG, "barge_in_armed interactionId=$monitorId parentInteractionId=$parentInteractionId session=$session " +
+            "microphone_owner=${MicrophoneOwnership.currentOwner()} tts_active=${robotCore.isCurrent(session, RobotActivityState.SPEAKING)}")
+
+        try {
+            speechInput.startListening(session, language, object : SpeechInput.Callback {
+                override fun onSpeechStarted(sessionId: Long) = dispatchOnMain {
+                    if (bargeInMonitorId != monitorId || activeSessionId != sessionId) return@dispatchOnMain
+                    bargeInSpeechStartedAtMs = SystemClock.elapsedRealtime()
+                    Log.i(TAG, "barge_in_voice_activity interactionId=$monitorId session=$sessionId")
+                    // PCM mode has no interim transcripts. Its VOICE_RECOGNITION source has an
+                    // attached Android echo canceller; platform recognition decides from partial text.
+                    if (speechInput is PcmSpeechInput) beginBargeIn(sessionId, monitorId)
+                }
+
+                override fun onPartialTranscript(sessionId: Long, transcript: String) = dispatchOnMain {
+                    if (bargeInMonitorId != monitorId || activeSessionId != sessionId) return@dispatchOnMain
+                    if (BargeInEchoFilter.isLikelyEcho(transcript, currentSpokenResponse)) {
+                        Log.i(TAG, "barge_in_echo_suppressed interactionId=$monitorId chars=${transcript.length}")
+                    } else {
+                        beginBargeIn(sessionId, monitorId)
+                    }
+                }
+
+                override fun onRecordingReady(sessionId: Long, recording: AudioRecording) {
+                    releaseBargeInLease(lease)
+                    dispatchOnMain {
+                        if (bargeInMonitorId != monitorId || bargeInTriggeredId != monitorId) {
+                            recording.close()
+                            finishBargeInMonitor(monitorId)
+                            return@dispatchOnMain
+                        }
+                        finishBargeInMonitor(monitorId)
+                        onRecordingReady(sessionId, language, monitorId, recording)
+                    }
+                }
+
+                override fun onTranscriptReady(sessionId: Long, transcript: String) {
+                    releaseBargeInLease(lease)
+                    dispatchOnMain {
+                        if (bargeInMonitorId != monitorId || activeSessionId != sessionId) return@dispatchOnMain
+                        if (bargeInTriggeredId != monitorId && !BargeInEchoFilter.isLikelyEcho(transcript, currentSpokenResponse)) {
+                            beginBargeIn(sessionId, monitorId)
+                        }
+                        val accepted = bargeInTriggeredId == monitorId
+                        finishBargeInMonitor(monitorId)
+                        if (accepted) onTranscriptReady(sessionId, language, monitorId, transcript)
+                        else {
+                            Log.i(TAG, "barge_in_echo_result_ignored interactionId=$monitorId chars=${transcript.length}")
+                            scheduleBargeInRearm(sessionId, language, parentInteractionId)
+                        }
+                    }
+                }
+
+                override fun onError(sessionId: Long, message: String) {
+                    releaseBargeInLease(lease)
+                    dispatchOnMain {
+                        if (bargeInMonitorId != monitorId || activeSessionId != sessionId) return@dispatchOnMain
+                        val wasTriggered = bargeInTriggeredId == monitorId
+                        finishBargeInMonitor(monitorId)
+                        if (wasTriggered) reportFailure(sessionId, message)
+                        else scheduleBargeInRearm(sessionId, language, parentInteractionId)
+                    }
+                }
+            })
+        } catch (error: RuntimeException) {
+            releaseBargeInLease(lease)
+            finishBargeInMonitor(monitorId)
+            Log.w(TAG, "barge_in_start_failed session=$session type=${error.javaClass.simpleName}")
+        }
+    }
+
+    private fun beginBargeIn(session: Long, monitorId: String) {
+        if (bargeInMonitorId != monitorId || activeSessionId != session || bargeInTriggeredId == monitorId) return
+        val activity = robotCore.snapshot.activity
+        if (activity !in setOf(RobotActivityState.THINKING, RobotActivityState.SPEAKING, RobotActivityState.PROACTIVE_SPEAKING)) return
+        val detectedAt = bargeInSpeechStartedAtMs.takeIf { it > 0L } ?: SystemClock.elapsedRealtime()
+        val stopStartedAt = SystemClock.elapsedRealtime()
+        cancelNoCommandTimeout()
+        cancelConversationSessionTimeout()
+        recognitionTask?.cancel(true)
+        recognitionTask = null
+        activeRecording?.close()
+        activeRecording = null
+        conversationEngine.cancelCurrentRequest()
+        if (activity == RobotActivityState.SPEAKING || activity == RobotActivityState.PROACTIVE_SPEAKING) speechOutput.stop()
+        currentSpokenResponse = null
+        activeInteractionId = monitorId
+        pendingCorrectionContext = currentUserTranscript
+        listeningForFollowUp = false
+        bargeInTriggeredId = monitorId
+        robotCore.dispatch(RobotEvent.BargeInDetected(session))
+        robotCore.dispatch(RobotEvent.BargeInListeningStarted(session))
+        applyEmotionEvent(EmotionEvent.INTERACTION_STARTED)
+        Log.i(TAG, "barge_in_detected interactionId=$monitorId session=$session " +
+            "speech_to_tts_stop_ms=${SystemClock.elapsedRealtime() - detectedAt} " +
+            "handling_ms=${SystemClock.elapsedRealtime() - stopStartedAt}")
+    }
+
+    private fun scheduleBargeInRearm(session: Long, language: VoiceLanguage, parentInteractionId: String) {
+        if (closed || activeSessionId != session ||
+            robotCore.snapshot.activity !in setOf(
+                RobotActivityState.THINKING,
+                RobotActivityState.SPEAKING,
+                RobotActivityState.PROACTIVE_SPEAKING
+            )
+        ) return
+        cancelBargeInRetry()
+        lateinit var retry: Runnable
+        retry = Runnable {
+            if (bargeInRetry === retry) bargeInRetry = null
+            armBargeInMonitor(session, parentInteractionId, language)
+        }
+        bargeInRetry = retry
+        mainHandler.postDelayed(retry, BARGE_IN_RETRY_MS)
+    }
+
+    private fun finishBargeInMonitor(monitorId: String) {
+        if (bargeInMonitorId != monitorId) return
+        bargeInMonitorId = null
+        bargeInTriggeredId = null
+        bargeInSpeechStartedAtMs = 0L
+        bargeInMicrophoneLease?.close()
+        bargeInMicrophoneLease = null
+    }
+
+    private fun cancelBargeInMonitor(reason: String) {
+        val monitorId = bargeInMonitorId ?: return
+        Log.i(TAG, "barge_in_monitor_cancelled interactionId=$monitorId reason=$reason")
+        finishBargeInMonitor(monitorId)
+        speechInput.cancel()
+        bargeInMicrophoneLease?.close()
+        bargeInMicrophoneLease = null
+    }
+
+    private fun releaseBargeInLease(lease: MicrophoneOwnership.Lease) {
+        lease.close()
+        if (bargeInMicrophoneLease === lease) bargeInMicrophoneLease = null
+    }
+
     private fun speakResponse(session: Long, interactionId: String, response: String, language: VoiceLanguage,
                               afterSpeech: (() -> String?)? = null) {
         if (closed || activeInteractionId != interactionId ||
             !robotCore.isCurrent(session, RobotActivityState.SPEAKING)
         ) return
 
+        currentSpokenResponse = response
         Log.i(TAG, "tts_playback_requested interactionId=$interactionId session=$session chars=${response.length}")
         speechOutput.speak(
             response,
@@ -436,19 +679,35 @@ internal class VoiceInteractionController(
                         "after_reply_ms=${if (replyReadyAtMs > 0L) SystemClock.elapsedRealtime() - replyReadyAtMs else -1L} " +
                         "preview=${VoiceDiagnostics.redactedPreview(response)}"
                 )
+                armBargeInMonitor(session, interactionId, language)
             }
 
             override fun onCompleted() = dispatchOnMain {
                 if (closed || activeSessionId != session || activeInteractionId != interactionId) {
                     return@dispatchOnMain
                 }
-                if (activeSessionId == session && activeInteractionId == interactionId) {
-                    activeSessionId = null
-                    activeInteractionId = null
-                }
+                cancelBargeInMonitor("tts_completed")
+                currentSpokenResponse = null
                 applyEmotionEvent(EmotionEvent.INTERACTION_FINISHED, scheduleDecay = true)
                 Log.i(TAG, "tts_playback_completed interactionId=$interactionId session=$session")
-                robotCore.dispatch(RobotEvent.SpeechCompleted(session))
+                val sessionTimeoutMs = sessionTimeoutMillisProvider().coerceAtLeast(0L)
+                val continueConversation = afterSpeech == null && sessionTimeoutMs > 0L
+                if (continueConversation) {
+                    activeSessionId = session
+                    activeInteractionId = null
+                    conversationSessionId = session
+                    pendingCorrectionContext = currentUserTranscript
+                } else {
+                    activeSessionId = null
+                    activeInteractionId = null
+                    conversationSessionId = null
+                    pendingCorrectionContext = null
+                }
+                robotCore.dispatch(RobotEvent.SpeechCompleted(session, continueConversation))
+                if (continueConversation && robotCore.isCurrent(session, RobotActivityState.FOLLOW_UP_LISTENING)) {
+                    scheduleConversationSessionTimeout(session)
+                    startFollowUpListening(session)
+                }
                 afterSpeech?.invoke()?.takeIf(String::isNotBlank)?.let { failure ->
                     speakPostActionFailure(interactionId, session, failure, language)
                 }
@@ -479,6 +738,9 @@ internal class VoiceInteractionController(
         if (closed || robotCore.snapshot.sessionId != session) return
         if (robotCore.snapshot.activity !in VOICE_STATES) return
         cancelNoCommandTimeout()
+        cancelConversationSessionTimeout()
+        cancelFollowUpRetry()
+        cancelBargeInMonitor("interaction_failed")
         Log.w(TAG, "interaction_failed interactionId=${activeInteractionId ?: "unknown"} session=$session")
         applyEmotionEvent(EmotionEvent.INTERACTION_FAILED, scheduleDecay = true)
         speechInput.cancel()
@@ -489,6 +751,9 @@ internal class VoiceInteractionController(
         activeRecording = null
         activeSessionId = null
         activeInteractionId = null
+        conversationSessionId = null
+        currentSpokenResponse = null
+        listeningForFollowUp = false
         speechOutput.stop()
         onCaptionChanged(null)
         robotCore.dispatch(RobotEvent.SessionFailed(session, message))
@@ -496,6 +761,9 @@ internal class VoiceInteractionController(
 
     private fun cancelSessionOnClose(sessionId: Long) {
         cancelNoCommandTimeout()
+        cancelConversationSessionTimeout()
+        cancelFollowUpRetry()
+        cancelBargeInMonitor("activity_closed")
         speechInput.cancel()
         releaseActiveMicrophoneLease()
         recognitionTask?.cancel(true)
@@ -504,6 +772,9 @@ internal class VoiceInteractionController(
         activeRecording = null
         activeSessionId = null
         activeInteractionId = null
+        conversationSessionId = null
+        currentSpokenResponse = null
+        listeningForFollowUp = false
         conversationEngine.cancelCurrentRequest()
         speechOutput.stop()
         onCaptionChanged(null)
@@ -521,6 +792,73 @@ internal class VoiceInteractionController(
 
     private fun releaseActiveMicrophoneLease() {
         activeMicrophoneLease?.let(::releaseMicrophoneLease)
+    }
+
+    private fun scheduleConversationSessionTimeout(sessionId: Long) {
+        cancelConversationSessionTimeout()
+        val timeoutMs = sessionTimeoutMillisProvider().coerceAtLeast(0L)
+        if (timeoutMs == 0L) return
+        lateinit var timeout: Runnable
+        timeout = Runnable {
+            if (conversationSessionTimeout === timeout) conversationSessionTimeout = null
+            if (closed || conversationSessionId != sessionId || activeSessionId != sessionId ||
+                robotCore.snapshot.sessionId != sessionId ||
+                robotCore.snapshot.activity !in setOf(RobotActivityState.FOLLOW_UP_LISTENING, RobotActivityState.LISTENING)
+            ) return@Runnable
+            Log.i(TAG, "conversation_session_timeout session=$sessionId timeout_ms=$timeoutMs")
+            robotCore.dispatch(RobotEvent.ConversationSessionTimedOut(sessionId)).forEach { effect ->
+                if (effect is RobotEffect.CancelVoiceSession) cancelSession(effect.sessionId)
+            }
+        }
+        conversationSessionTimeout = timeout
+        mainHandler.postDelayed(timeout, timeoutMs)
+        Log.i(TAG, "conversation_session_timeout_scheduled session=$sessionId timeout_ms=$timeoutMs")
+    }
+
+    private fun cancelConversationSessionTimeout() {
+        conversationSessionTimeout?.let(mainHandler::removeCallbacks)
+        conversationSessionTimeout = null
+    }
+
+    private fun recoverFollowUpListening(sessionId: Long, interactionId: String, reason: String) {
+        if (closed || activeSessionId != sessionId || activeInteractionId != interactionId ||
+            conversationSessionId != sessionId
+        ) return
+        cancelNoCommandTimeout()
+        releaseActiveMicrophoneLease()
+        speechInput.cancel()
+        recognitionTask?.cancel(true)
+        recognitionTask = null
+        activeRecording?.close()
+        activeRecording = null
+        activeInteractionId = null
+        listeningForFollowUp = true
+        onCaptionChanged(null)
+        if (robotCore.snapshot.activity in setOf(RobotActivityState.LISTENING, RobotActivityState.THINKING)) {
+            robotCore.dispatch(RobotEvent.FollowUpListeningEnded(sessionId))
+        }
+        Log.i(TAG, "follow_up_listening_retry session=$sessionId reason=$reason")
+        scheduleConversationSessionTimeout(sessionId)
+        cancelFollowUpRetry()
+        lateinit var retry: Runnable
+        retry = Runnable {
+            if (followUpRetry === retry) followUpRetry = null
+            if (!closed && conversationSessionId == sessionId &&
+                robotCore.isCurrent(sessionId, RobotActivityState.FOLLOW_UP_LISTENING)
+            ) startFollowUpListening(sessionId)
+        }
+        followUpRetry = retry
+        mainHandler.postDelayed(retry, FOLLOW_UP_RETRY_MS)
+    }
+
+    private fun cancelFollowUpRetry() {
+        followUpRetry?.let(mainHandler::removeCallbacks)
+        followUpRetry = null
+    }
+
+    private fun cancelBargeInRetry() {
+        bargeInRetry?.let(mainHandler::removeCallbacks)
+        bargeInRetry = null
     }
 
     private fun scheduleNoCommandTimeout(sessionId: Long, interactionId: String) {
@@ -556,10 +894,15 @@ internal class VoiceInteractionController(
         const val TAG = "VoiceInteraction"
         const val EMOTION_DECAY_REFRESH_MS = 22_000L
         const val NO_COMMAND_TIMEOUT_MS = 8_000L
+        const val FOLLOW_UP_RETRY_MS = 650L
+        const val BARGE_IN_RETRY_MS = 400L
         val VOICE_STATES = setOf(
             RobotActivityState.LISTENING,
             RobotActivityState.THINKING,
-            RobotActivityState.SPEAKING
+            RobotActivityState.SPEAKING,
+            RobotActivityState.PROACTIVE_SPEAKING,
+            RobotActivityState.INTERRUPTED,
+            RobotActivityState.FOLLOW_UP_LISTENING
         )
     }
 }

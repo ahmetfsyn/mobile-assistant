@@ -3,7 +3,9 @@ package com.companion.assistant
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
 import android.os.SystemClock
+import android.util.Log
 import java.io.ByteArrayOutputStream
 import java.io.Closeable
 import kotlin.math.sqrt
@@ -71,6 +73,7 @@ internal class AudioRecorder {
     private fun record(session: Long, callback: Callback) {
         val output = WipingByteArrayOutputStream(INITIAL_CAPACITY)
         var recorder: AudioRecord? = null
+        var echoCanceler: AcousticEchoCanceler? = null
         var completedRecording: AudioRecording? = null
         var errorMessage: String? = null
         var shouldNotify = false
@@ -103,6 +106,16 @@ internal class AudioRecorder {
             createdRecorder.startRecording()
             if (createdRecorder.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
                 throw RecordingFailure("MİKROFON BAŞLATILAMADI")
+            }
+            if (AcousticEchoCanceler.isAvailable()) {
+                echoCanceler = runCatching { AcousticEchoCanceler.create(createdRecorder.audioSessionId) }.getOrNull()
+                val enabled = runCatching {
+                    echoCanceler?.enabled = true
+                    echoCanceler?.enabled == true
+                }.getOrDefault(false)
+                Log.i(TAG, "recording_echo_canceller available=true enabled=$enabled")
+            } else {
+                Log.i(TAG, "recording_echo_canceller available=false enabled=false")
             }
 
             val samples = ShortArray(bufferSize / 2)
@@ -167,6 +180,8 @@ internal class AudioRecorder {
             }
         } finally {
             output.erase()
+            try { echoCanceler?.release() } catch (_: RuntimeException) { }
+            echoCanceler = null
             if (recorder != null) {
                 try {
                     if (recorder.recordingState == AudioRecord.RECORDSTATE_RECORDING) recorder.stop()
@@ -203,6 +218,7 @@ internal class AudioRecorder {
     private class RecordingFailure(message: String) : Exception(message)
 
     private companion object {
+        const val TAG = "AudioRecorder"
         const val SAMPLE_RATE = 16_000
         const val MIN_BUFFER_SIZE = 4096
         const val INITIAL_CAPACITY = SAMPLE_RATE * 2 * 2

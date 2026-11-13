@@ -10,13 +10,30 @@ internal enum class TurkishClockQuery { TIME, WEEKDAY, DATE }
 
 internal enum class LocalCommandRoute { NATIVE_ALARM, DEVICE_CLOCK, COMPANION_REMINDER, CONVERSATION_BACKEND }
 
-internal object LocalCommandRouteSelector {
-    fun select(alarm: LocalActionResult?, clock: LocalActionResult?, reminder: String?): LocalCommandRoute = when {
-        alarm != null -> LocalCommandRoute.NATIVE_ALARM
-        clock != null -> LocalCommandRoute.DEVICE_CLOCK
-        reminder != null -> LocalCommandRoute.COMPANION_REMINDER
-        else -> LocalCommandRoute.CONVERSATION_BACKEND
+internal data class LocalCommandDispatchResult(
+    val route: LocalCommandRoute,
+    val result: LocalActionResult
+)
+
+/** Deterministic local handlers win; only an unmatched message is allowed to require the backend. */
+internal object LocalCommandDispatcher {
+    fun dispatch(alarm: LocalActionResult?, clock: LocalActionResult?, reminder: String?): LocalCommandDispatchResult = when {
+        alarm != null -> LocalCommandDispatchResult(LocalCommandRoute.NATIVE_ALARM, alarm)
+        clock != null -> LocalCommandDispatchResult(LocalCommandRoute.DEVICE_CLOCK, clock)
+        reminder != null -> LocalCommandDispatchResult(
+            LocalCommandRoute.COMPANION_REMINDER,
+            LocalActionResult(LocalActionStatus.LOCAL_SUCCESS, reminder)
+        )
+        else -> LocalCommandDispatchResult(
+            LocalCommandRoute.CONVERSATION_BACKEND,
+            LocalActionResult(LocalActionStatus.REMOTE_REQUIRED, "")
+        )
     }
+}
+
+internal object LocalCommandRouteSelector {
+    fun select(alarm: LocalActionResult?, clock: LocalActionResult?, reminder: String?): LocalCommandRoute =
+        LocalCommandDispatcher.dispatch(alarm, clock, reminder).route
 }
 
 /** Recognizes only deterministic device-clock questions; these never go to the conversation backend. */
@@ -46,6 +63,21 @@ internal object TurkishClockQueryParser {
             "şu anda saat kaç" in text || "su anda saat kac" in folded
         ) return TurkishClockQuery.TIME
         return null
+    }
+
+    fun parseCorrection(previousTranscript: String, correctionTranscript: String): TurkishClockQuery? {
+        val previous = parse(previousTranscript) ?: return null
+        val correction = normalize(correctionTranscript)
+        if ("hayır" !in correction && "hayir" !in correction && "değil" !in correction && "degil" !in correction) {
+            return null
+        }
+        return when {
+            previous == TurkishClockQuery.TIME && ("tarih" in correction || "gün" in correction || "gun" in correction) ->
+                if ("gün" in correction || "gun" in correction) TurkishClockQuery.WEEKDAY else TurkishClockQuery.DATE
+            previous == TurkishClockQuery.DATE && ("saat" in correction || "zaman" in correction) -> TurkishClockQuery.TIME
+            previous == TurkishClockQuery.WEEKDAY && "tarih" in correction -> TurkishClockQuery.DATE
+            else -> null
+        }
     }
 }
 
@@ -118,14 +150,20 @@ internal class LocalClockCommandProcessor(
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val timeZone: () -> TimeZone = TimeZone::getDefault
 ) {
-    fun process(transcript: String, interactionId: String = "unknown"): LocalActionResult? {
-        val query = TurkishClockQueryParser.parse(transcript) ?: return null
+    fun process(
+        transcript: String,
+        interactionId: String = "unknown",
+        correctionContext: String? = null
+    ): LocalActionResult? {
+        val query = TurkishClockQueryParser.parse(transcript)
+            ?: correctionContext?.let { TurkishClockQueryParser.parseCorrection(it, transcript) }
+            ?: return null
         val normalized = TurkishClockQueryParser.normalize(transcript)
         Log.i(TAG, "local_command_candidate interactionId=$interactionId transcript=\"${LocalCommandDiagnostics.safeTranscript(transcript)}\" normalized=\"${LocalCommandDiagnostics.safeTranscript(normalized)}\"")
         Log.i(TAG, "local_command_selected interactionId=$interactionId intent=clock.${query.name.lowercase(Locale.US)}")
         val response = TurkishClockResponseFormatter.response(query, nowMillis(), timeZone())
         Log.i(TAG, "local_handler_called interactionId=$interactionId handler=device_clock result=${query.name.lowercase(Locale.US)} tz=${timeZone().id}")
-        return LocalActionResult(LocalActionStatus.SUCCESS, response)
+        return LocalActionResult(LocalActionStatus.LOCAL_SUCCESS, response)
     }
 
     private companion object { const val TAG = "LocalCommand" }

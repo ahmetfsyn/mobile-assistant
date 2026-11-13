@@ -8,6 +8,9 @@ internal enum class RobotActivityState {
     LISTENING,
     THINKING,
     SPEAKING,
+    INTERRUPTED,
+    FOLLOW_UP_LISTENING,
+    SESSION_TIMEOUT,
     PROACTIVE_SPEAKING,
     AWAKE_GRACE,
     RETURNING_TO_SLEEP,
@@ -63,7 +66,13 @@ internal sealed interface RobotEvent {
     data class RecordingCompleted(val sessionId: Long) : RobotEvent
     data class TranscriptReady(val sessionId: Long, val hasText: Boolean) : RobotEvent
     data class ConversationReady(val sessionId: Long, val hasReply: Boolean) : RobotEvent
-    data class SpeechCompleted(val sessionId: Long) : RobotEvent
+    data class SpeechCompleted(val sessionId: Long, val continueConversation: Boolean = false) : RobotEvent
+    data class FollowUpListeningStarted(val sessionId: Long) : RobotEvent
+    data class FollowUpListeningEnded(val sessionId: Long) : RobotEvent
+    data class BargeInDetected(val sessionId: Long) : RobotEvent
+    data class BargeInListeningStarted(val sessionId: Long) : RobotEvent
+    data class ConversationSessionTimedOut(val sessionId: Long) : RobotEvent
+    data class SessionTimeoutFinished(val sessionId: Long) : RobotEvent
     data class AwakeGraceElapsed(val sessionId: Long) : RobotEvent
     data class WakeAnimationCompleted(val sessionId: Long) : RobotEvent
     data class SleepAnimationCompleted(val sessionId: Long) : RobotEvent
@@ -246,9 +255,65 @@ internal class RobotCore(
 
         is RobotEvent.SpeechCompleted -> {
             if (isCurrent(event.sessionId, RobotActivityState.SPEAKING)) {
-                snapshot = snapshot.copy(activity = RobotActivityState.AWAKE_GRACE,
-                    sessionId = snapshot.sessionId + 1L, errorMessage = null)
+                snapshot = if (event.continueConversation) {
+                    snapshot.copy(activity = RobotActivityState.FOLLOW_UP_LISTENING, errorMessage = null)
+                } else {
+                    snapshot.copy(activity = RobotActivityState.AWAKE_GRACE,
+                        sessionId = snapshot.sessionId + 1L, errorMessage = null)
+                }
             }
+            emptyList()
+        }
+
+        is RobotEvent.FollowUpListeningStarted -> {
+            if (isCurrent(event.sessionId, RobotActivityState.FOLLOW_UP_LISTENING)) {
+                snapshot = snapshot.copy(activity = RobotActivityState.LISTENING, errorMessage = null)
+            }
+            emptyList()
+        }
+
+        is RobotEvent.FollowUpListeningEnded -> {
+            if (event.sessionId == snapshot.sessionId &&
+                snapshot.activity in setOf(RobotActivityState.LISTENING, RobotActivityState.THINKING)
+            ) {
+                snapshot = snapshot.copy(activity = RobotActivityState.FOLLOW_UP_LISTENING, errorMessage = null)
+            }
+            emptyList()
+        }
+
+        is RobotEvent.BargeInDetected -> {
+            if (event.sessionId == snapshot.sessionId &&
+                snapshot.activity in setOf(
+                    RobotActivityState.THINKING,
+                    RobotActivityState.SPEAKING,
+                    RobotActivityState.PROACTIVE_SPEAKING
+                )
+            ) snapshot = snapshot.copy(activity = RobotActivityState.INTERRUPTED, errorMessage = null)
+            emptyList()
+        }
+
+        is RobotEvent.BargeInListeningStarted -> {
+            if (isCurrent(event.sessionId, RobotActivityState.INTERRUPTED)) {
+                snapshot = snapshot.copy(activity = RobotActivityState.LISTENING, errorMessage = null)
+            }
+            emptyList()
+        }
+
+        is RobotEvent.ConversationSessionTimedOut -> {
+            if (event.sessionId == snapshot.sessionId &&
+                snapshot.activity in setOf(RobotActivityState.FOLLOW_UP_LISTENING, RobotActivityState.LISTENING)
+            ) {
+                snapshot = snapshot.copy(
+                    activity = RobotActivityState.SESSION_TIMEOUT,
+                    sessionId = snapshot.sessionId + 1L,
+                    errorMessage = null
+                )
+                listOf(RobotEffect.CancelVoiceSession(event.sessionId))
+            } else emptyList()
+        }
+
+        is RobotEvent.SessionTimeoutFinished -> {
+            if (isCurrent(event.sessionId, RobotActivityState.SESSION_TIMEOUT)) beginReturningToSleep()
             emptyList()
         }
 
@@ -321,7 +386,9 @@ internal class RobotCore(
         }
 
         RobotEvent.SleepRequested -> {
-            if (snapshot.activity == RobotActivityState.IDLE || snapshot.activity == RobotActivityState.AWAKE_GRACE) {
+            if (snapshot.activity == RobotActivityState.IDLE || snapshot.activity == RobotActivityState.AWAKE_GRACE ||
+                snapshot.activity == RobotActivityState.FOLLOW_UP_LISTENING
+            ) {
                 beginReturningToSleep()
             }
             emptyList()
@@ -348,7 +415,8 @@ internal class RobotCore(
             hostResumed = false
             if (snapshot.activity in VOICE_STATES) cancelToSleepingImmediately()
             else if (snapshot.activity == RobotActivityState.AWAKE_GRACE || snapshot.activity == RobotActivityState.WAKING ||
-                snapshot.activity == RobotActivityState.RETURNING_TO_SLEEP
+                snapshot.activity == RobotActivityState.RETURNING_TO_SLEEP ||
+                snapshot.activity == RobotActivityState.SESSION_TIMEOUT
             ) {
                 enterSleepingImmediately()
                 emptyList()
@@ -376,7 +444,7 @@ internal class RobotCore(
         if (!hostResumed || activity == RobotActivityState.BOOTING || activity == RobotActivityState.CLOSED) {
             return emptyList()
         }
-        if (activity == RobotActivityState.LISTENING) return cancelToSleep()
+        if (activity == RobotActivityState.LISTENING || activity == RobotActivityState.FOLLOW_UP_LISTENING) return cancelToSleep()
         if (activity == RobotActivityState.AWAKE_GRACE) return startListening()
         if (activity == RobotActivityState.WAKING) return emptyList()
         return beginWaking()
@@ -448,6 +516,8 @@ internal class RobotCore(
             RobotActivityState.LISTENING,
             RobotActivityState.THINKING,
             RobotActivityState.SPEAKING,
+            RobotActivityState.INTERRUPTED,
+            RobotActivityState.FOLLOW_UP_LISTENING,
             RobotActivityState.PROACTIVE_SPEAKING
         )
     }
