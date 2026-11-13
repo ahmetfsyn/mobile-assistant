@@ -8,19 +8,29 @@ import java.util.concurrent.atomic.AtomicBoolean
 internal data class WakeWordRecognition(val commandTranscript: String?)
 
 internal object WakeWordConfidencePolicy {
-    const val MINIMUM_CONFIDENCE = 0.65
+    const val MINIMUM_CONFIDENCE = 0.55
+    const val WAKE_ONLY_FALLBACK_CONFIDENCE = 0.90
 
     fun accepts(confidence: Double): Boolean = confidence >= MINIMUM_CONFIDENCE
+
+    fun allowsWakeOnlyFallback(confidence: Double): Boolean = confidence >= WAKE_ONLY_FALLBACK_CONFIDENCE
 }
 
 /** A completed utterance must start with the standalone Turkish wake word Ayşe. */
 internal object WakeWordMatcher {
     private val turkish = Locale("tr", "TR")
     private val firstToken = Regex("^([^\\s,.:!?;]+)")
+    private val confusableWakeNames = setOf("aylin", "ayşegül", "ayşe'nin")
 
     fun isExactAyse(transcript: String?): Boolean {
         val recognition = match(transcript) ?: return false
         return recognition.commandTranscript == null
+    }
+
+    fun isKnownConfusableStart(transcript: String?): Boolean {
+        val normalized = Normalizer.normalize(transcript.orEmpty().trim(), Normalizer.Form.NFC).lowercase(turkish)
+        val token = firstToken.find(normalized)?.groupValues?.get(1)?.replace('’', '\'') ?: return false
+        return token in confusableWakeNames
     }
 
     fun match(transcript: String?): WakeWordRecognition? {

@@ -345,6 +345,8 @@ internal class VoskWakeWordEngine(modelDirectory: File) : WakeWordEngine {
         wakeRecognizer = try {
             Recognizer(loadedModel, WakeWordMonitor.SAMPLE_RATE_HZ.toFloat(), WAKE_GRAMMAR).apply {
                 setWords(true)
+                // Keep a short pause for a command after “Ayşe” while reducing endpoint delay.
+                setEndpointerDelays(ENDPOINTER_INITIAL_SILENCE_SECONDS, ENDPOINTER_END_SILENCE_SECONDS, ENDPOINTER_MAX_SECONDS)
             }
         } catch (error: Throwable) {
             loadedModel.close()
@@ -374,10 +376,19 @@ internal class VoskWakeWordEngine(modelDirectory: File) : WakeWordEngine {
 
         val audio = utteranceAudio.toByteArray()
         utteranceAudio.erase()
-        val commandTranscript = try {
+        val commandDecode = try {
             decodeCommandFromSameUtterance(audio)
         } finally {
             audio.fill(0)
+        }
+        if (commandDecode.similarName) {
+            Log.i(TAG, "wake_candidate_rejected reason=similar_name confidence=$confidence")
+            return null
+        }
+        val commandTranscript = commandDecode.transcript
+        if (commandTranscript.isNullOrBlank() && !WakeWordConfidencePolicy.allowsWakeOnlyFallback(confidence)) {
+            Log.i(TAG, "wake_candidate_rejected reason=low_confidence_unconfirmed confidence=$confidence")
+            return null
         }
         Log.i(TAG, "wake_candidate_accepted confidence=$confidence command_handoff=${!commandTranscript.isNullOrBlank()}")
         return commandTranscript ?: "Ayşe"
@@ -389,8 +400,8 @@ internal class VoskWakeWordEngine(modelDirectory: File) : WakeWordEngine {
         try { wakeRecognizer.close() } finally { model.close() }
     }
 
-    private fun decodeCommandFromSameUtterance(audio: ByteArray): String? {
-        if (audio.isEmpty()) return null
+    private fun decodeCommandFromSameUtterance(audio: ByteArray): CommandDecode {
+        if (audio.isEmpty()) return CommandDecode()
         val decoder = Recognizer(model, WakeWordMonitor.SAMPLE_RATE_HZ.toFloat()).apply { setWords(true) }
         return try {
             val ended = decoder.acceptWaveForm(audio, audio.size)
@@ -399,19 +410,28 @@ internal class VoskWakeWordEngine(modelDirectory: File) : WakeWordEngine {
             } else {
                 JSONObject(decoder.finalResult).optString("text").trim()
             }
-            val match = WakeWordMatcher.match(resultText) ?: return null
-            if (match.commandTranscript?.contains("[unk]") == true) null else resultText
+            if (WakeWordMatcher.isKnownConfusableStart(resultText)) return CommandDecode(similarName = true)
+            val match = WakeWordMatcher.match(resultText) ?: return CommandDecode()
+            if (match.commandTranscript?.contains("[unk]") == true) CommandDecode() else CommandDecode(resultText)
         } catch (error: RuntimeException) {
             Log.w(TAG, "wake_command_handoff_failed type=${error.javaClass.simpleName}")
-            null
+            CommandDecode()
         } finally {
             decoder.close()
         }
     }
 
+    private data class CommandDecode(
+        val transcript: String? = null,
+        val similarName: Boolean = false
+    )
+
     private companion object {
         const val TAG = "WakeWordService"
         const val WAKE_GRAMMAR = "[\"ayşe\",\"aylin\",\"ayşegül\",\"ayşe'nin\",\"[unk]\"]"
+        const val ENDPOINTER_INITIAL_SILENCE_SECONDS = 5f
+        const val ENDPOINTER_END_SILENCE_SECONDS = 0.4f
+        const val ENDPOINTER_MAX_SECONDS = 20f
         const val MAX_UTTERANCE_BYTES = WakeWordMonitor.SAMPLE_RATE_HZ * 2 * 15
     }
 

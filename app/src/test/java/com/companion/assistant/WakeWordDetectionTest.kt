@@ -11,9 +11,12 @@ import java.io.IOException
 class WakeWordDetectionTest {
     @Test
     fun wakeConfidenceAcceptsMeasuredAyseCandidatesAndRejectsLowerScores() {
+        assertTrue(WakeWordConfidencePolicy.accepts(0.573))
         assertTrue(WakeWordConfidencePolicy.accepts(0.683))
         assertTrue(WakeWordConfidencePolicy.accepts(0.697))
-        assertFalse(WakeWordConfidencePolicy.accepts(0.649))
+        assertFalse(WakeWordConfidencePolicy.accepts(0.549))
+        assertTrue(WakeWordConfidencePolicy.allowsWakeOnlyFallback(0.90))
+        assertFalse(WakeWordConfidencePolicy.allowsWakeOnlyFallback(0.899))
     }
 
     @Test
@@ -35,6 +38,10 @@ class WakeWordDetectionTest {
         assertEquals("hava nasıl", WakeWordMatcher.match("Ayşe, hava nasıl?")?.commandTranscript)
         assertEquals(null, WakeWordMatcher.match("Aylin hava nasıl?"))
         assertEquals(null, WakeWordMatcher.match("Ayşegül, hava nasıl?"))
+        assertTrue(WakeWordMatcher.isKnownConfusableStart("Ayşegül"))
+        assertTrue(WakeWordMatcher.isKnownConfusableStart("AYŞE’NİN adı"))
+        assertTrue(WakeWordMatcher.isKnownConfusableStart("Aylin merhaba"))
+        assertFalse(WakeWordMatcher.isKnownConfusableStart("Ayşe, saat kaç"))
     }
 
     @Test
